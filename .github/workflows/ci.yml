@@ -1,0 +1,35 @@
+name: "CI"
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: "read"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "windows-latest"]
+    runs-on: "${{ matrix.os }}"
+    steps:
+      - name: "Check out repository"
+        uses: "actions/checkout@v4"
+      - name: "Show Python version"
+        run: "python --version"
+      - name: "Check Python syntax"
+        run: "python -m compileall -q skills tests"
+      - name: "Validate skill structure and metadata"
+        run: "python -m unittest tests.test_skill_structure -v"
+      - name: "Run deterministic unit tests"
+        run: "python -m unittest discover -s tests -v"
+      - name: "Run npm dry run"
+        run: "python skills/sgrx/scripts/sgrx.py resolve --dry-run --json --registry npm --package zod --project tests/fixtures/consumer"
+      - name: "Run PyPI dry run"
+        run: "python skills/sgrx/scripts/sgrx.py resolve --dry-run --json --registry pypi --package httpx==0.28.1 --project tests/fixtures/consumer"
+      - name: "Run crates.io dry run"
+        run: "python skills/sgrx/scripts/sgrx.py resolve --dry-run --json --registry crates --package serde@1.0.228 --project tests/fixtures/consumer"
+      - name: "Run GitHub dry run"
+        run: "python skills/sgrx/scripts/sgrx.py resolve --dry-run --json --registry github --package owner/repository@v2.1.0 --project tests/fixtures/consumer"

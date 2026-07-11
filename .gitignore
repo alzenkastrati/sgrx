@@ -1,0 +1,11 @@
+.sgrx/
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+graphify-out/
+node_modules/

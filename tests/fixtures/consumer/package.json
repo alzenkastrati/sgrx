@@ -1,0 +1,7 @@
+{
+  "name": "sgrx-consumer-fixture",
+  "private": true,
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

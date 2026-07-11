@@ -1,0 +1,4 @@
+interface:
+  display_name: "SGRX — Source Graph Research eXplorer"
+  short_description: "Trace dependency source and execution graphs"
+  default_prompt: "Use $sgrx to trace this dependency from the consumer call site into its exact implementation and assess the change impact."
