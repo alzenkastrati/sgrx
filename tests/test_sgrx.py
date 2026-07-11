@@ -31,7 +31,7 @@ def namespace(**overrides):
         "registry": "npm",
         "ref": None,
         "version": None,
-        "source_path": str(DEPENDENCY),
+        "source_path": None,
         "mode": "standard",
         "allow_global_graph": False,
         "allow_gitnexus_group": False,
@@ -44,6 +44,27 @@ def namespace(**overrides):
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+class FakeIndexRunner(sgrx.CommandRunner):
+    def __init__(self):
+        super().__init__(timeout=1)
+
+    def run(self, args, *, cwd=None, env=None):
+        vector = list(args)
+        stdout = ""
+        if vector[:2] == ["graphify", "extract"]:
+            output = Path(vector[vector.index("--out") + 1]) / "graphify-out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "graph.json").write_text('{"nodes": [], "links": []}', encoding="utf-8")
+        elif vector[:4] == ["npx", "--no-install", "gitnexus", "analyze"]:
+            source = Path(vector[4])
+            (source / ".gitnexus").mkdir(parents=True, exist_ok=True)
+        elif "query" in vector:
+            stdout = '{"processes": [], "definitions": []}'
+        result = sgrx.CommandResult(vector, 0, stdout=stdout)
+        self.history.append(result)
+        return result
 
 
 class RunnerSafetyTests(unittest.TestCase):
@@ -99,8 +120,25 @@ class RunnerSafetyTests(unittest.TestCase):
             ["tool", "--token", "[REDACTED]", "password=[REDACTED]"],
         )
 
+    def test_secret_tool_output_is_redacted(self):
+        result = sgrx.CommandResult(["tool"], 0, "api_key=super-secret-value\nAuthorization: Bearer abc.def", "password=hunter2")
+        payload = sgrx.result_payload(result)
+        self.assertNotIn("super-secret-value", payload["stdout"])
+        self.assertNotIn("abc.def", payload["stdout"])
+        self.assertNotIn("hunter2", payload["stderr"])
+
+    def test_environment_is_passed_without_shell(self):
+        completed = subprocess.CompletedProcess(["tool"], 0, "ok", "")
+        with mock.patch.object(sgrx.subprocess, "run", return_value=completed) as run:
+            sgrx.CommandRunner().run(["tool"], env={"HOME": "isolated-home"})
+        self.assertEqual(run.call_args.kwargs["env"]["HOME"], "isolated-home")
+        self.assertIs(run.call_args.kwargs["shell"], False)
+
 
 class ValidationTests(unittest.TestCase):
+    def test_slug_does_not_duplicate_explicit_version(self):
+        self.assertEqual(sgrx.safe_slug("owner/repository@1.2.3", "1.2.3"), "owner-repository-1.2.3")
+
     def test_valid_package_specs(self):
         cases = [
             ("npm", "@scope/package@1.2.3"),
@@ -139,6 +177,15 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(command[-2:], ["--name", "zod-4.4.3"])
         self.assertIn("--skip-git", command)
 
+    def test_opensrc_path_must_stay_inside_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowed = root / "cache" / "package"
+            outside = root / "outside"
+            allowed.mkdir(parents=True); outside.mkdir()
+            self.assertEqual(sgrx.locate_source(str(allowed), cache_root=root / "cache"), allowed.resolve())
+            self.assertIsNone(sgrx.locate_source(str(outside), cache_root=root / "cache"))
+
 
 class WorkflowTests(unittest.TestCase):
     def test_doctor_reports_missing_tools_without_installing(self):
@@ -171,7 +218,7 @@ class WorkflowTests(unittest.TestCase):
         runner = sgrx.CommandRunner(dry_run=True)
         payload = sgrx.analyze(namespace(), runner)
         executables = [item.args[0] for item in runner.history]
-        self.assertEqual(executables[0], "opensrc")
+        self.assertLess(executables.index("node"), executables.index("opensrc"))
         self.assertIn("graphify", executables)
         self.assertIn("npx", executables)
         forbidden = {"npm", "pnpm", "yarn", "cargo", "pytest"}
@@ -179,13 +226,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(payload["consumer_call_sites"])
         self.assertTrue(all(row["evidence_status"] == "EXTRACTED" for row in payload["consumer_call_sites"]))
 
+    def test_analyze_can_use_explicit_local_source_without_opensrc(self):
+        runner = sgrx.CommandRunner(dry_run=True)
+        args = namespace(source_path=str(DEPENDENCY))
+        payload = sgrx.analyze(args, runner)
+        self.assertEqual(payload["provenance"]["resolution_status"], "LOCAL_SOURCE")
+        self.assertFalse(any(item.args[:2] == ["opensrc", "path"] for item in runner.history))
+
     def test_index_uses_separate_state_by_default(self):
         runner = sgrx.CommandRunner(dry_run=True)
         payload = sgrx.index_sources(namespace(), runner, DEPENDENCY)
         self.assertTrue(payload["manifest"]["separate_graphs"])
         self.assertFalse(payload["manifest"]["global_graph_opt_in"])
         commands = payload["manifest"]["commands"]
-        self.assertEqual([row["args"][0] for row in commands], ["graphify", "npx"])
+        self.assertEqual([row["args"][0] for row in commands], ["graphify", "npx", "graphify", "npx", "npx"])
+        graph_command = commands[0]["args"]
+        self.assertEqual(graph_command[1], "extract")
+        self.assertIn("--out", graph_command)
+        self.assertNotIn("--global", graph_command)
         self.assertNotIn("group", json.dumps(commands))
 
     def test_gitnexus_group_requires_opt_in(self):
@@ -194,6 +252,39 @@ class WorkflowTests(unittest.TestCase):
         payload = sgrx.index_sources(args, runner, DEPENDENCY)
         self.assertTrue(payload["manifest"]["gitnexus_group_opt_in"])
         self.assertIn("group", json.dumps(payload["manifest"]["commands"]))
+        group_commands = [row["args"] for row in payload["manifest"]["commands"] if "group" in row["args"]]
+        self.assertEqual([command[4] for command in group_commands], ["create", "add", "sync"])
+
+    def test_real_index_contract_keeps_source_immutable_and_artifacts_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "consumer"
+            source = Path(directory) / "dependency"
+            project.mkdir(); source.mkdir()
+            (source / "module.py").write_text("def public_api():\n    return 1\n", encoding="utf-8")
+            before = sgrx.source_tree_identity(source)
+            args = namespace(project=str(project), source_path=str(source), version="1.0.0", dry_run=False)
+            payload = sgrx.index_sources(args, FakeIndexRunner(), source)
+            manifest = payload["manifest"]
+            self.assertEqual(payload["status"], "HEALTHY")
+            self.assertEqual(before, sgrx.source_tree_identity(source))
+            self.assertFalse((source / ".gitnexus").exists())
+            self.assertTrue(Path(manifest["graph_path"]).is_file())
+            self.assertTrue(Path(manifest["gitnexus_source"]).joinpath(".gitnexus").is_dir())
+            self.assertTrue(Path(manifest["graph_path"]).is_relative_to(Path(payload["artifact_dir"])))
+
+    def test_changed_source_gets_a_new_isolated_gitnexus_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "consumer"
+            source = Path(directory) / "dependency"
+            project.mkdir(); source.mkdir()
+            module = source / "module.py"
+            module.write_text("value = 1\n", encoding="utf-8")
+            args = namespace(project=str(project), source_path=str(source), version="1.0.0", dry_run=False, force=True)
+            first = sgrx.index_sources(args, FakeIndexRunner(), source)
+            module.write_text("value = 2\n", encoding="utf-8")
+            second = sgrx.index_sources(args, FakeIndexRunner(), source)
+            self.assertNotEqual(first["manifest"]["gitnexus_alias"], second["manifest"]["gitnexus_alias"])
+            self.assertNotEqual(first["manifest"]["gitnexus_source"], second["manifest"]["gitnexus_source"])
 
     def test_version_comparison_uses_source_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -218,6 +309,21 @@ class WorkflowTests(unittest.TestCase):
 
     def test_help_starts_with_brand(self):
         self.assertTrue(sgrx.build_parser().format_help().startswith(sgrx.BRAND))
+
+    def test_cli_exposes_version(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as stopped, redirect_stdout(output):
+            sgrx.build_parser().parse_args(["--version"])
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertIn(sgrx.VERSION, output.getvalue())
+
+    def test_lockfile_versions_for_pypi_and_crates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "requirements.txt").write_text("httpx==0.28.1\n", encoding="utf-8")
+            (root / "Cargo.lock").write_text('[[package]]\nname = "serde"\nversion = "1.0.228"\n', encoding="utf-8")
+            self.assertEqual(sgrx.lockfile_version(root, "httpx", "pypi"), "0.28.1")
+            self.assertEqual(sgrx.lockfile_version(root, "serde", "crates"), "1.0.228")
 
 
 class ReportTests(unittest.TestCase):

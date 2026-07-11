@@ -14,6 +14,7 @@ class SkillStructureTests(unittest.TestCase):
         required = [
             ROOT / "README.md",
             ROOT / "LICENSE",
+            ROOT / "VERSION",
             ROOT / ".gitignore",
             ROOT / ".github" / "workflows" / "ci.yml",
             SKILL / "SKILL.md",
@@ -100,6 +101,12 @@ class SkillStructureTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("SGRX", text)
         self.assertIn("$sgrx", (ROOT / "README.md").read_text(encoding="utf-8"))
+
+    def test_release_version_is_consistent(self):
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f'VERSION = "{version}"', (SKILL / "scripts" / "sgrx.py").read_text(encoding="utf-8"))
+        self.assertIn(f"version: **{version}**", (ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_ci_uses_no_package_downloads(self):
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

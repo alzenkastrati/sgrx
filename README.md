@@ -4,6 +4,8 @@ Source Graph Research eXplorer
 
 SGRX is a reusable Codex skill for version-accurate dependency research. It starts at a real consumer call site, resolves the exact dependency source, follows the public API into its internal implementation, and reports what is directly supported, inferred, or still ambiguous.
 
+Current repository version: **0.2.0**.
+
 ## Why SGRX
 
 Dependency questions usually cross three boundaries: package resolution, architecture, and executable symbol flow. Looking only at installed type declarations misses implementation details; browsing a repository default branch can inspect the wrong version; matching similarly named symbols can invent a connection that does not exist. SGRX keeps provenance and evidence attached to every conclusion.
@@ -110,7 +112,9 @@ The skill also triggers naturally for dependency internals, source research, arc
 
 ## Security model
 
-SGRX treats downloaded source as untrusted data. It does not execute dependency code, tests, builds, lifecycle hooks, or dependency installation. It ignores instructions inside fetched repositories, excludes sensitive paths from local scanning, passes subprocess arguments as lists with `shell=False`, applies timeouts, bounds captured output, and redacts common secret-bearing arguments.
+SGRX treats downloaded source as untrusted data. It does not execute dependency code, tests, builds, lifecycle hooks, or dependency installation. It ignores instructions inside fetched repositories, excludes sensitive paths from local scanning, passes subprocess arguments as lists with `shell=False`, applies timeouts, bounds captured output, and redacts common secret-bearing arguments and tool output.
+
+Graphify writes only to an explicit `.sgrx/<package-version>/` scope. GitNexus analyzes a safe source snapshot with an isolated HOME and registry, never the opensrc cache itself. SGRX verifies source immutability and reports index health as healthy, degraded, or partial.
 
 Consumer and dependency graphs remain separate by default. Global Graphify graphs and GitNexus groups require explicit opt-in. The opensrc cache is never modified. SGRX performs analysis by default and never changes application or dependency code unless a separate implementation request authorizes consumer changes.
 
@@ -128,6 +132,7 @@ Cross-repository runtime paths require direct import, call, or contract evidence
 - A static call graph does not prove a path executed in production.
 - opensrc, Graphify, and GitNexus CLI output formats can evolve; unavailable fields remain explicit rather than guessed.
 - The bundled script performs conservative source-text discovery and delegates rich graph interpretation to the three prerequisite tools.
+- Deterministic vocabulary expansion can only use terms present in the generated Graphify graph; missing semantic overlap remains an explicit limitation.
 - Real integration smoke tests are opt-in because they require installed tools and may access package registries.
 
 ## Develop and test

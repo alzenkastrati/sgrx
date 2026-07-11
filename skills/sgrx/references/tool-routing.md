@@ -21,19 +21,19 @@ Never execute files inside the returned path. Never run a package manager in the
 
 ## Isolate Graphify state
 
-Create separate graphs for the consumer and dependency. Run `graphify query`, `graphify path`, `graphify explain`, or `graphify extract` against the appropriate graph. Reuse an index only when its source identity and tool inputs match. Mark mismatched indexes stale.
+Create separate graphs for the consumer and dependency. Run `graphify extract <source> --out <artifact-scope>` so generated state never lands in fetched source. Run `graphify query`, `graphify path`, or `graphify explain` against the explicit graph path. Reuse an index only when its content identity, tool inputs, output path, and health checks match. Mark mismatched indexes stale and incomplete search capability degraded.
 
 Create a global or merged graph only when `--allow-global-graph` or equivalent explicit consent is present. Preserve edge direction and evidence labels. Refuse name-only joins.
 
 ## Isolate GitNexus state
 
-Index fetched source with:
+Copy fetched source into `.sgrx/<package-version>/gitnexus-source/<identity>/`, excluding secrets, tool state, dependency directories, and symlinks. Index that safe snapshot with:
 
 ```text
 npx gitnexus analyze <source-path> --index-only --name <package-version-alias>
 ```
 
-Use a safe argument vector and prevent implicit npx downloads when orchestrating unattended analysis. Use `group create`, `group add`, `group sync`, `group query`, and `group impact` only after group opt-in.
+Use a safe argument vector and prevent implicit npx downloads when orchestrating unattended analysis. Sandbox HOME and USERPROFILE under the artifact scope so GitNexus cannot mutate the user's global registry. Verify the original source identity after indexing. Use `group create`, `group add`, `group sync`, `group query`, and `group impact` only after group opt-in.
 
 Before changing a symbol, query upstream impact. Report direct callers, affected processes, and the GitNexus risk level. Pause for confirmation at HIGH or CRITICAL. Before committing an authorized change, run `gitnexus detect-changes` and include its result in the handoff.
 

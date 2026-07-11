@@ -1,4 +1,5 @@
 .sgrx/
+.gitnexus/
 __pycache__/
 *.py[cod]
 .coverage

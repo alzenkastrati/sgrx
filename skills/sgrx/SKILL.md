@@ -27,9 +27,9 @@ Keep the consumer and dependency in separate Graphify graphs by default. Index d
 
 1. Run `python scripts/sgrx.py doctor` and report missing prerequisites with installation guidance. Require Node.js 18 or newer, Git, opensrc, Graphify, npx, and GitNexus. Never install them without permission.
 2. Resolve the dependency from a consumer lockfile when possible. Otherwise require an explicit version or Git ref. Run `opensrc path <package> --cwd <consumer-project>` and record registry, resolved version, ref, commit, lockfile, cache path, timestamp, tool versions, and executed commands.
-3. Reuse current indexes. Report stale indexes. Create missing indexes only in the requested scope. Store SGRX artifacts under `.sgrx/<package-version>/` and leave the opensrc cache unchanged.
+3. Reuse current healthy indexes. Report stale or degraded indexes. Create missing indexes only in the requested scope. Run Graphify with an explicit `.sgrx/<package-version>/` output directory. Copy fetched source into an isolated SGRX snapshot before GitNexus indexing, sandbox its HOME and registry, and verify that the opensrc cache remains byte-for-byte unchanged.
 4. Inspect consumer imports, re-exports, wrappers, adapters, configuration, calls, validation, error handling, tests, and execution flows.
-5. Trace the public dependency export through facades and wrappers to implementation, validation, errors, fallbacks, tests, deprecations, and edge cases.
+5. Query the isolated Graphify and GitNexus indexes. Trace the public dependency export through facades and wrappers to implementation, validation, errors, fallbacks, tests, deprecations, and edge cases. Keep query relevance AMBIGUOUS until imports, calls, or contracts prove the project-boundary transition.
 6. Map the project boundary with consumer and dependency file/line evidence, GitNexus symbols or processes, Graphify relationships, evidence status, confidence, and uncertainty.
 7. Run GitNexus upstream-impact analysis before any proposed symbol change. Show direct callers, affected processes, and risk. Stop for confirmation before any HIGH or CRITICAL change. Run `gitnexus detect-changes` before every commit.
 8. Generate a report without filling evidence gaps. Mark unavailable tools, unresolved paths, and inconclusive outputs visibly.
