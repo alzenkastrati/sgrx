@@ -23,7 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 BRAND = "SGRX — Source Graph Research eXplorer"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 EVIDENCE_STATUSES = ("EXTRACTED", "INFERRED", "AMBIGUOUS")
 MODES = ("quick", "standard", "deep")
 REGISTRIES = ("npm", "pypi", "crates", "github")

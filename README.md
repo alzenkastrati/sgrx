@@ -4,7 +4,7 @@ Source Graph Research eXplorer
 
 SGRX is a reusable Codex skill for version-accurate dependency research. It starts at a real consumer call site, resolves the exact dependency source, follows the public API into its internal implementation, and reports what is directly supported, inferred, or still ambiguous.
 
-Current repository version: **0.2.0**.
+Current repository version: **0.2.1**.
 
 ## Why SGRX
 
