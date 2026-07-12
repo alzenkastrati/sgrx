@@ -2,13 +2,17 @@
 
 Source Graph Research eXplorer
 
+[![CI](https://github.com/alzenkastrati/sgrx/actions/workflows/ci.yml/badge.svg)](https://github.com/alzenkastrati/sgrx/actions/workflows/ci.yml)
+[![Integration](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml/badge.svg)](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 SGRX is a reusable Codex skill for version-accurate dependency research. It starts at a real consumer call site, resolves the exact dependency source, follows the public API into its internal implementation, and reports what is directly supported, inferred, or still ambiguous.
 
 Current repository version: **0.4.1**.
 
 ## Release status
 
-`0.4.1` is a release candidate. Deterministic checks run on every push and pull request; the separate Integration workflow runs the real OpenSrc, Graphify, and GitNexus smoke tests on Ubuntu and Windows weekly or on demand. Treat an unavailable prerequisite, degraded GitNexus search, or incomplete source checkout as a visible limitation, never as a successful trace.
+`0.4.1` is the first public research-mode release. Deterministic checks run on every push and pull request; the separate Integration workflow runs the real OpenSrc, Graphify, and GitNexus smoke tests on Ubuntu and Windows weekly or on demand. Treat an unavailable prerequisite, degraded GitNexus search, or incomplete source checkout as a visible limitation, never as a successful trace.
 
 ## Why SGRX
 
@@ -41,8 +45,6 @@ $CODEX_HOME/skills/sgrx
 ```
 
 Restart Codex so the new `$sgrx` skill is discovered.
-
-If the repository is private, the installer needs GitHub access to this repository.
 
 ## Local prerequisites
 
@@ -196,3 +198,7 @@ CI runs deterministic tests on Ubuntu and Windows without package installation. 
 ## License
 
 SGRX is released under the MIT License.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes,
+[SECURITY.md](SECURITY.md) for private vulnerability reporting, and
+[CHANGELOG.md](CHANGELOG.md) for release history.

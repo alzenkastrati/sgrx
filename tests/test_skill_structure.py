@@ -15,6 +15,9 @@ class SkillStructureTests(unittest.TestCase):
         required = [
             ROOT / "README.md",
             ROOT / "LICENSE",
+            ROOT / "CHANGELOG.md",
+            ROOT / "CONTRIBUTING.md",
+            ROOT / "SECURITY.md",
             ROOT / "VERSION",
             ROOT / ".gitignore",
             ROOT / ".github" / "workflows" / "ci.yml",
