@@ -47,6 +47,18 @@ SGRX coordinates three tools:
 
 This helps Codex avoid guessing from documentation, inspecting the wrong version, or sending too much source code into the model.
 
+## Why it can use fewer tokens
+
+SGRX narrows the evidence **before** Codex reads it:
+
+- It ranks papers and repositories instead of analyzing every candidate.
+- `quick` and `standard` modes build code-only snapshots.
+- Graph queries return the relevant files, functions, and relationships—not an entire repository.
+- Saved indexes and checkpoints avoid repeating completed research.
+- A token budget limits how much material enters semantic analysis.
+
+In one SGRX self-research run, the selected corpus used **5,499 Graphify input tokens** after filtering. This is an observed workflow example, not a guaranteed saving or a measurement of total Codex/API usage. Actual results depend on the question, repositories, and research mode.
+
 ## Install
 
 Ask Codex:
