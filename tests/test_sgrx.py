@@ -298,12 +298,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_tool_version_check_records_version(self):
         runner = sgrx.CommandRunner()
-        completed = subprocess.CompletedProcess(["tool"], 0, "v20.0.0\n", "")
+        completed = subprocess.CompletedProcess(["tool"], 0, "v24.0.0\n", "")
         with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.shutil, "which", return_value="tool"), mock.patch.object(
             sgrx.subprocess, "run", return_value=completed
         ):
             payload = sgrx.doctor(runner)
-        self.assertEqual(payload["tools"]["node"]["version"], "v20.0.0")
+        self.assertEqual(payload["tools"]["node"]["version"], "v24.0.0")
         self.assertTrue(payload["tools"]["node"]["meets_minimum"])
 
     def test_dry_run_resolve_records_provenance_and_lockfile(self):

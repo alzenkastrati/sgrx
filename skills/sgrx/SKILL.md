@@ -25,7 +25,7 @@ Keep the consumer and dependency in separate Graphify graphs and isolated GitNex
 
 ## Execute the workflow
 
-1. Run `python scripts/sgrx.py doctor` and report missing prerequisites with installation guidance. Require Node.js 18 or newer, Git, opensrc, Graphify, npx, and GitNexus. Never install them without permission.
+1. Run `python scripts/sgrx.py doctor` and report missing prerequisites with installation guidance. Require Node.js 24 or newer, Git, opensrc, Graphify, npx, and GitNexus. Never install them without permission.
 2. Resolve the dependency from a consumer lockfile when possible. Otherwise require an explicit version or Git ref. Run `opensrc path <package> --cwd <consumer-project>` and record registry, resolved version, ref, commit, lockfile, cache path, timestamp, tool versions, and executed commands.
 3. Reuse current healthy indexes. Report stale or degraded indexes. Create missing indexes only in the requested scope. Run Graphify with identity-specific consumer and dependency output directories under `.sgrx/<package-version>/`. Copy each distinct role into an isolated SGRX snapshot before GitNexus indexing, sandbox its HOME, registry, and Git discovery boundary, and verify that the original consumer and opensrc source remain byte-for-byte unchanged.
 4. Inspect consumer imports, re-exports, wrappers, adapters, configuration, calls, validation, error handling, tests, and execution flows.

@@ -25,6 +25,7 @@ All notable changes to SGRX are documented in this file. The format follows
 - Rejected incomplete OpenSrc Git checkouts instead of treating them as valid source evidence.
 - Isolated GitNexus state and prevented parent-repository discovery.
 - Reduced Graphify input size for normal research runs by excluding unrelated prose and generated state.
+- Reported missing Graphify semantic backends as an explicit partial paper graph instead of requiring a nonexistent artifact.
 
 ## [0.2.1] - 2026-07-12
 

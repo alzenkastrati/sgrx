@@ -25,7 +25,7 @@ jobs:
       - name: "Set up Node.js"
         uses: "actions/setup-node@v4"
         with:
-          node-version: "20"
+          node-version: "24"
       - name: "Install pinned integration tools"
         run: "npm install --global opensrc@0.7.3 gitnexus@1.6.5 && python -m pip install graphifyy==0.9.12"
       - name: "Verify toolchain"

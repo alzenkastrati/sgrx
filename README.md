@@ -49,13 +49,13 @@ Restart Codex so the new `$sgrx` skill is discovered.
 ## Local prerequisites
 
 - Python 3.10 or newer for the bundled orchestration script
-- Node.js 18 or newer, including `npx`
+- Node.js 24 or newer, including `npx`
 - Git
 - opensrc 0.7.3 or newer
 - Graphify 0.9.12 or newer
 - GitNexus 1.6.5 or newer
 
-The integration workflow uses Python 3.12 and Node.js 20. For a matching local toolchain:
+The integration workflow uses Python 3.12 and Node.js 24. For a matching local toolchain:
 
 ```console
 npm install --global opensrc@0.7.3 gitnexus@1.6.5
@@ -141,6 +141,7 @@ The CLI does not silently browse the web itself: Codex performs current-paper di
 - Re-run the same research command after interruption. Matching paper and repository checkpoints are reused automatically; use `--force` only to discard that reuse.
 - On Windows, SGRX detects incomplete OpenSrc Git checkouts and retries once in an isolated short cache path with `core.longpaths` enabled for that child process only. It never changes the global Git configuration or deletes the original cache.
 - GitNexus can report degraded keyword search when its local FTS extension is unavailable. Graph and symbol evidence remain visible, but treat missing keyword results as incomplete and re-run the index on a host with working FTS before relying on search completeness.
+- Graphify requires a configured supported semantic backend to extract pure document or paper corpora. Without one, SGRX keeps the paper metadata, reports the paper graph as `PARTIAL`, and continues repository research without inventing paper relationships.
 - Use `python skills/sgrx/scripts/sgrx.py doctor --json` before a new host or WSL run. Missing tools are reported with no automatic installation.
 
 ## Security model

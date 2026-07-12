@@ -492,17 +492,17 @@ def doctor(runner: CommandRunner) -> dict[str, Any]:
         }
     node_version = tools["node"].get("version") or ""
     match = re.search(r"(\d+)", node_version)
-    tools["node"]["meets_minimum"] = bool(match and int(match.group(1)) >= 18) if not runner.dry_run else None
+    tools["node"]["meets_minimum"] = bool(match and int(match.group(1)) >= 24) if not runner.dry_run else None
     return {"brand": BRAND, "timestamp": utc_now(), "tools": tools, "commands": command_log(runner.history)}
 
 
 def install_hint(tool: str) -> str:
     return {
-        "node": "Install Node.js 18 or newer from the official Node.js distribution.",
+        "node": "Install Node.js 24 or newer from the official Node.js distribution.",
         "git": "Install Git from the official Git distribution.",
         "opensrc": "Install opensrc using its documented CLI installation method.",
         "graphify": "Install Graphify using its documented CLI installation method.",
-        "npx": "Install Node.js 18 or newer, which includes npx.",
+        "npx": "Install Node.js 24 or newer, which includes npx.",
         "gitnexus": "Install GitNexus using its documented CLI installation method.",
     }[tool]
 
@@ -1477,6 +1477,10 @@ def _paper_graph(
         limitations = []
         if materialization == "metadata_abstract":
             limitations.append("Paper graph uses supplied metadata and abstract, not verified full text.")
+        if not runner.dry_run and not graph_path.is_file():
+            limitations.append(
+                "Paper graph extraction produced no graph. Configure a supported Graphify semantic backend for document and paper inputs."
+            )
         if parse_error:
             limitations.append(parse_error)
         return {

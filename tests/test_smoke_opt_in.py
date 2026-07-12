@@ -44,8 +44,8 @@ class LocalIntegrationSmokeTests(unittest.TestCase):
             self.assertIn('"source_unchanged": true', completed.stdout)
             payload = json.loads(completed.stdout)
             health = payload["indexing"]["health"]
-            self.assertNotEqual(health["gitnexus_status_state"], "STALE")
-            self.assertTrue(health["gitnexus_status_ok"])
+            self.assertNotEqual(health["gitnexus_status_state"], "STALE", json.dumps(health, indent=2))
+            self.assertTrue(health["gitnexus_status_ok"], json.dumps(health, indent=2))
             self.assertFalse((ROOT / "tests" / "fixtures" / "dependency" / ".gitnexus").exists())
 
     def test_research_mode_builds_paper_repo_graphs_and_plan(self):
@@ -93,10 +93,20 @@ class LocalIntegrationSmokeTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertTrue(Path(payload["build_plan"]).is_file())
-            self.assertTrue(Path(payload["papers"][0]["indexing"]["graph_path"]).is_file())
+            paper_indexing = payload["papers"][0]["indexing"]
+            paper_graph_exists = Path(paper_indexing["graph_path"]).is_file()
+            if paper_graph_exists:
+                self.assertIn(paper_indexing["status"], {"HEALTHY", "PARTIAL"})
+            else:
+                self.assertEqual(paper_indexing["status"], "PARTIAL")
+                self.assertTrue(any("semantic backend" in item for item in paper_indexing["limitations"]))
             repository = payload["repositories"][0]
             self.assertTrue(Path(repository["indexing"]["graph_path"]).is_file())
-            self.assertEqual(repository["indexing"]["health"]["gitnexus_status_state"], "ISOLATED")
+            self.assertEqual(
+                repository["indexing"]["health"]["gitnexus_status_state"],
+                "ISOLATED",
+                json.dumps(repository["indexing"]["health"], indent=2),
+            )
             self.assertTrue(repository["graph_nodes"])
             self.assertIn("parseEmail", Path(payload["build_plan"]).read_text(encoding="utf-8"))
             self.assertTrue(payload["relationships"]["EXTRACTED"])
