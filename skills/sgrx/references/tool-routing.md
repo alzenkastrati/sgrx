@@ -10,6 +10,7 @@
 | Trace an execution flow | GitNexus | Graphify | Process or flow plus corroborating relationships |
 | Compare versions | opensrc twice | Graphify and GitNexus separately | Two provenances and evidence-backed differences |
 | Assess a local change | GitNexus impact | Consumer graph | Direct/indirect callers, processes, risk |
+| Research how to build a system | Current web search + primary papers | OpenSrc, Graphify, GitNexus | Ranked evidence, isolated graphs, detailed build plan |
 
 ## Resolve source safely
 
@@ -27,13 +28,13 @@ Create a global or merged graph only when `--allow-global-graph` or equivalent e
 
 ## Isolate GitNexus state
 
-Copy fetched source into `.sgrx/<package-version>/gitnexus-source/<identity>/`, excluding secrets, tool state, dependency directories, and symlinks. Index that safe snapshot with:
+Copy fetched dependency source into `.sgrx/<package-version>/gitnexus-source/<identity>/` and a distinct consumer into `.sgrx/<package-version>/consumer/gitnexus-source/<identity>/`, excluding secrets, tool state, dependency directories, and symlinks. Index each safe snapshot with a role-specific alias:
 
 ```text
 npx gitnexus analyze <source-path> --index-only --name <package-version-alias>
 ```
 
-Use a safe argument vector and prevent implicit npx downloads when orchestrating unattended analysis. Sandbox HOME and USERPROFILE under the artifact scope so GitNexus cannot mutate the user's global registry. Verify the original source identity after indexing. Use `group create`, `group add`, `group sync`, `group query`, and `group impact` only after group opt-in.
+Use a safe argument vector and prevent implicit npx downloads when orchestrating unattended analysis. Sandbox HOME and USERPROFILE under the artifact scope and set a Git discovery ceiling at each snapshot boundary so GitNexus cannot mutate the user's global registry or inherit an unrelated parent commit. Verify both original source identities after indexing. Use `group create`, add both `consumer` and `dependency` roles, then use `group sync`, `group query`, and `group impact` only after group opt-in.
 
 Before changing a symbol, query upstream impact. Report direct callers, affected processes, and the GitNexus risk level. Pause for confirmation at HIGH or CRITICAL. Before committing an authorized change, run `gitnexus detect-changes` and include its result in the handoff.
 

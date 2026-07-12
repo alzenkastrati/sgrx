@@ -57,9 +57,12 @@ class FakeIndexRunner(sgrx.CommandRunner):
             output = Path(vector[vector.index("--out") + 1]) / "graphify-out"
             output.mkdir(parents=True, exist_ok=True)
             (output / "graph.json").write_text('{"nodes": [], "links": []}', encoding="utf-8")
+            stdout = "[graphify extract] tokens: 120 in / 30 out\n"
         elif vector[:4] == ["npx", "--no-install", "gitnexus", "analyze"]:
             source = Path(vector[4])
             (source / ".gitnexus").mkdir(parents=True, exist_ok=True)
+        elif vector[-1:] == ["status"]:
+            stdout = "Not a git repository.\n"
         elif "query" in vector:
             stdout = '{"processes": [], "definitions": []}'
         result = sgrx.CommandResult(vector, 0, stdout=stdout)
@@ -70,7 +73,7 @@ class FakeIndexRunner(sgrx.CommandRunner):
 class RunnerSafetyTests(unittest.TestCase):
     def test_subprocess_uses_argument_list_and_shell_false(self):
         completed = subprocess.CompletedProcess(["tool", "arg"], 0, "ok", "")
-        with mock.patch.object(sgrx.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.subprocess, "run", return_value=completed) as run:
             result = sgrx.CommandRunner(timeout=2).run(["tool", "arg"], cwd=FIXTURE)
         self.assertTrue(result.ok)
         positional, keywords = run.call_args
@@ -79,16 +82,17 @@ class RunnerSafetyTests(unittest.TestCase):
         self.assertEqual(keywords["timeout"], 2)
 
     def test_windows_powershell_shim_uses_file_argument_vector(self):
-        completed = subprocess.CompletedProcess(["powershell"], 0, "ok", "")
+        process = mock.Mock(pid=123, returncode=0)
+        process.communicate.return_value = ("ok", "")
         which = lambda name: {"tool": r"C:\bin\tool.ps1", "pwsh": r"C:\bin\pwsh.exe"}.get(name)
-        with mock.patch.object(sgrx.os, "name", "nt"), mock.patch.object(sgrx.shutil, "which", side_effect=which), mock.patch.object(
-            sgrx.subprocess, "run", return_value=completed
-        ) as run:
+        with mock.patch.object(sgrx, "is_windows", return_value=True), mock.patch.object(sgrx.shutil, "which", side_effect=which), mock.patch.object(
+            sgrx.subprocess, "Popen", return_value=process
+        ) as popen:
             sgrx.CommandRunner().run(["tool", "value with spaces"])
-        executed = run.call_args.args[0]
+        executed = popen.call_args.args[0]
         self.assertEqual(executed[:5], [r"C:\bin\pwsh.exe", "-NoProfile", "-NonInteractive", "-File", r"C:\bin\tool.ps1"])
         self.assertEqual(executed[5], "value with spaces")
-        self.assertIs(run.call_args.kwargs["shell"], False)
+        self.assertIs(popen.call_args.kwargs["shell"], False)
 
     def test_rejects_string_command(self):
         with self.assertRaises(sgrx.SGRXError):
@@ -96,21 +100,21 @@ class RunnerSafetyTests(unittest.TestCase):
 
     def test_timeout_is_visible(self):
         expired = subprocess.TimeoutExpired(["tool"], 0.01, output=b"partial", stderr=b"late")
-        with mock.patch.object(sgrx.subprocess, "run", side_effect=expired):
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.subprocess, "run", side_effect=expired):
             result = sgrx.CommandRunner(timeout=0.01).run(["tool"])
         self.assertTrue(result.timed_out)
         self.assertEqual(result.stdout, "partial")
         self.assertFalse(result.ok)
 
     def test_missing_tool_is_visible(self):
-        with mock.patch.object(sgrx.subprocess, "run", side_effect=FileNotFoundError):
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.subprocess, "run", side_effect=FileNotFoundError):
             result = sgrx.CommandRunner().run(["missing-tool", "--version"])
         self.assertTrue(result.missing)
         self.assertEqual(result.returncode, 127)
 
     def test_output_is_bounded(self):
         completed = subprocess.CompletedProcess(["tool"], 0, "x" * 100, "")
-        with mock.patch.object(sgrx.subprocess, "run", return_value=completed):
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.subprocess, "run", return_value=completed):
             result = sgrx.CommandRunner(max_output=12).run(["tool"])
         self.assertEqual(len(result.stdout), 12)
 
@@ -129,9 +133,23 @@ class RunnerSafetyTests(unittest.TestCase):
 
     def test_environment_is_passed_without_shell(self):
         completed = subprocess.CompletedProcess(["tool"], 0, "ok", "")
-        with mock.patch.object(sgrx.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.subprocess, "run", return_value=completed) as run:
             sgrx.CommandRunner().run(["tool"], env={"HOME": "isolated-home"})
         self.assertEqual(run.call_args.kwargs["env"]["HOME"], "isolated-home")
+        self.assertIs(run.call_args.kwargs["shell"], False)
+
+    def test_windows_timeout_terminates_sgrx_owned_process_tree(self):
+        expired = subprocess.TimeoutExpired(["tool"], 0.01, output=b"partial", stderr=b"late")
+        process = mock.Mock(pid=456, returncode=None)
+        process.communicate.side_effect = [expired, ("terminated output", "terminated error")]
+        completed = subprocess.CompletedProcess(["taskkill"], 0, "", "")
+        with mock.patch.object(sgrx, "is_windows", return_value=True), mock.patch.object(sgrx.subprocess, "Popen", return_value=process), mock.patch.object(
+            sgrx.subprocess, "run", return_value=completed
+        ) as run:
+            result = sgrx.CommandRunner(timeout=0.01).run(["tool"])
+        self.assertTrue(result.timed_out)
+        self.assertIn("terminated output", result.stdout)
+        self.assertEqual(run.call_args.args[0], ["taskkill", "/PID", "456", "/T", "/F"])
         self.assertIs(run.call_args.kwargs["shell"], False)
 
 
@@ -186,6 +204,89 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(sgrx.locate_source(str(allowed), cache_root=root / "cache"), allowed.resolve())
             self.assertIsNone(sgrx.locate_source(str(outside), cache_root=root / "cache"))
 
+    def test_windows_long_path_resolution_retries_in_isolated_cache(self):
+        command = sgrx.command_for_opensrc("zod", "npm", FIXTURE)
+        with tempfile.TemporaryDirectory() as directory:
+            recovery_root = Path(directory) / "recovery"
+            source = recovery_root / "repos" / "zod"
+            source.mkdir(parents=True)
+            first = sgrx.CommandResult(command, 1, stderr="fatal: Filename too long")
+            second = sgrx.CommandResult(command, 0, stdout=f"{source}\n")
+            runner = sgrx.CommandRunner()
+            with mock.patch.object(sgrx, "is_windows", return_value=True), mock.patch.object(
+                sgrx, "windows_long_path_recovery_root", return_value=recovery_root
+            ), mock.patch.object(runner, "run", side_effect=[first, second]) as run:
+                payload = sgrx.resolve_dependency(namespace(dry_run=False), runner)
+        self.assertEqual(payload["resolution_status"], "RESOLVED_LONG_PATH_RECOVERY")
+        self.assertEqual(payload["cache_path"], str(source.resolve()))
+        self.assertTrue(payload["recovery"]["succeeded"])
+        retry_kwargs = run.call_args_list[1].kwargs
+        self.assertEqual(retry_kwargs["env"]["GIT_CONFIG_KEY_0"], "core.longpaths")
+        self.assertEqual(retry_kwargs["env"]["GIT_CONFIG_VALUE_0"], "true")
+
+    def test_gitnexus_environment_stops_parent_git_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "scope" / "gitnexus-source" / "identity"
+            environment = sgrx.gitnexus_env(root / "scope", snapshot, create=False)
+        self.assertEqual(environment["HOME"], str((root / "scope" / "gitnexus-home").resolve()))
+        self.assertEqual(environment["USERPROFILE"], environment["HOME"])
+        self.assertEqual(environment["GIT_CEILING_DIRECTORIES"], str(snapshot.resolve().parent))
+
+    def test_research_graph_snapshot_keeps_code_and_excludes_docs_and_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "module.py").write_text("value = 1\n", encoding="utf-8")
+            (source / "README.md").write_text("large prose corpus\n", encoding="utf-8")
+            (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+            snapshot, count = sgrx.prepare_research_graph_snapshot(source, root / "scope", sgrx.source_tree_identity(source))
+            self.assertEqual(count, 1)
+            self.assertTrue(snapshot.joinpath("module.py").is_file())
+            self.assertFalse(snapshot.joinpath("README.md").exists())
+            self.assertFalse(snapshot.joinpath(".env").exists())
+
+    def test_graphify_token_usage_is_measured_from_extract_output(self):
+        results = [
+            sgrx.CommandResult(["graphify", "extract", "source"], 0, stdout="tokens: 1,234 in / 56 out"),
+            sgrx.CommandResult(["graphify", "query", "term"], 0, stdout="tokens: 999 in / 999 out"),
+        ]
+        self.assertEqual(sgrx.graphify_token_usage(results), {"input": 1234, "output": 56})
+
+    def test_incomplete_opensrc_git_checkout_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "cache"
+            source.joinpath(".git").mkdir(parents=True)
+            runner = sgrx.CommandRunner()
+            responses = [
+                sgrx.CommandResult(["git", "rev-parse"], 0, stdout="a" * 40),
+                sgrx.CommandResult(["git", "status"], 0, stdout="D  README.md\nD  src/main.py\n"),
+            ]
+            with mock.patch.object(runner, "run", side_effect=responses):
+                integrity = sgrx.opensrc_checkout_integrity(source, runner)
+        self.assertFalse(integrity["usable"])
+        self.assertEqual(integrity["status"], "DIRTY_OR_INCOMPLETE")
+
+    def test_semantic_gitnexus_status_rejects_stale_success(self):
+        stale = sgrx.CommandResult(["gitnexus", "status"], 0, stdout="Status: stale (re-run gitnexus analyze)\n")
+        healthy = sgrx.CommandResult(["gitnexus", "status"], 0, stdout="Status: up-to-date\n")
+        isolated = sgrx.CommandResult(["gitnexus", "status"], 0, stdout="Not a git repository.\n")
+        unknown = sgrx.CommandResult(["gitnexus", "status"], 0, stdout="Unexpected output\n")
+        self.assertEqual(sgrx.gitnexus_status_state(stale), "STALE")
+        self.assertFalse(sgrx.gitnexus_status_ok(stale))
+        self.assertEqual(sgrx.gitnexus_status_state(healthy), "HEALTHY")
+        self.assertTrue(sgrx.gitnexus_status_ok(healthy))
+        self.assertEqual(sgrx.gitnexus_status_state(isolated), "ISOLATED")
+        self.assertTrue(sgrx.gitnexus_status_ok(isolated))
+        self.assertEqual(sgrx.gitnexus_status_state(unknown), "UNKNOWN")
+        self.assertFalse(sgrx.gitnexus_status_ok(unknown))
+
+    def test_json_parse_failure_is_explicit(self):
+        payload, error = sgrx._json_output_with_error(sgrx.CommandResult(["tool"], 0, stdout="not-json"))
+        self.assertEqual(payload, {})
+        self.assertIn("invalid JSON", error)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_doctor_reports_missing_tools_without_installing(self):
@@ -198,7 +299,7 @@ class WorkflowTests(unittest.TestCase):
     def test_tool_version_check_records_version(self):
         runner = sgrx.CommandRunner()
         completed = subprocess.CompletedProcess(["tool"], 0, "v20.0.0\n", "")
-        with mock.patch.object(sgrx.shutil, "which", return_value="tool"), mock.patch.object(
+        with mock.patch.object(sgrx, "is_windows", return_value=False), mock.patch.object(sgrx.shutil, "which", return_value="tool"), mock.patch.object(
             sgrx.subprocess, "run", return_value=completed
         ):
             payload = sgrx.doctor(runner)
@@ -239,11 +340,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(payload["manifest"]["separate_graphs"])
         self.assertFalse(payload["manifest"]["global_graph_opt_in"])
         commands = payload["manifest"]["commands"]
-        self.assertEqual([row["args"][0] for row in commands], ["graphify", "npx", "graphify", "npx", "npx"])
-        graph_command = commands[0]["args"]
-        self.assertEqual(graph_command[1], "extract")
-        self.assertIn("--out", graph_command)
-        self.assertNotIn("--global", graph_command)
+        self.assertEqual(len(commands), 10)
+        graph_commands = [row["args"] for row in commands if row["args"][:2] == ["graphify", "extract"]]
+        self.assertEqual(len(graph_commands), 2)
+        self.assertTrue(all("--out" in command for command in graph_commands))
+        self.assertTrue(all("--global" not in command for command in graph_commands))
+        manifest = payload["manifest"]
+        self.assertNotEqual(manifest["consumer_graph_path"], manifest["graph_path"])
+        self.assertNotEqual(manifest["consumer_gitnexus_alias"], manifest["gitnexus_alias"])
+        self.assertFalse(manifest["consumer_index_shared"])
         self.assertNotIn("group", json.dumps(commands))
 
     def test_gitnexus_group_requires_opt_in(self):
@@ -253,14 +358,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(payload["manifest"]["gitnexus_group_opt_in"])
         self.assertIn("group", json.dumps(payload["manifest"]["commands"]))
         group_commands = [row["args"] for row in payload["manifest"]["commands"] if "group" in row["args"]]
-        self.assertEqual([command[4] for command in group_commands], ["create", "add", "sync"])
+        self.assertEqual([command[4] for command in group_commands], ["create", "add", "add", "sync"])
+        add_commands = [command for command in group_commands if command[4] == "add"]
+        self.assertEqual([command[6] for command in add_commands], ["consumer", "dependency"])
 
     def test_real_index_contract_keeps_source_immutable_and_artifacts_scoped(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "consumer"
             source = Path(directory) / "dependency"
             project.mkdir(); source.mkdir()
+            (project / "app.py").write_text("value = 1\n", encoding="utf-8")
+            (project / ".env").write_text("TOKEN=consumer-secret\n", encoding="utf-8")
             (source / "module.py").write_text("def public_api():\n    return 1\n", encoding="utf-8")
+            (source / ".env").write_text("TOKEN=dependency-secret\n", encoding="utf-8")
             before = sgrx.source_tree_identity(source)
             args = namespace(project=str(project), source_path=str(source), version="1.0.0", dry_run=False)
             payload = sgrx.index_sources(args, FakeIndexRunner(), source)
@@ -270,7 +380,27 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse((source / ".gitnexus").exists())
             self.assertTrue(Path(manifest["graph_path"]).is_file())
             self.assertTrue(Path(manifest["gitnexus_source"]).joinpath(".gitnexus").is_dir())
+            self.assertTrue(Path(manifest["consumer_graph_path"]).is_file())
+            self.assertTrue(Path(manifest["consumer_gitnexus_source"]).joinpath(".gitnexus").is_dir())
+            self.assertFalse(Path(manifest["gitnexus_source"]).joinpath(".env").exists())
+            self.assertFalse(Path(manifest["consumer_gitnexus_source"]).joinpath(".env").exists())
+            self.assertNotEqual(manifest["consumer_gitnexus_alias"], manifest["gitnexus_alias"])
             self.assertTrue(Path(manifest["graph_path"]).is_relative_to(Path(payload["artifact_dir"])))
+            graph_commands = [row["args"] for row in manifest["commands"] if row["args"][:2] == ["graphify", "extract"]]
+            self.assertEqual(
+                {command[2] for command in graph_commands},
+                {str(source.resolve()), str(project.resolve())},
+            )
+
+    def test_self_analysis_reuses_one_index_for_both_roles(self):
+        runner = sgrx.CommandRunner(dry_run=True)
+        args = namespace(project=str(DEPENDENCY), source_path=str(DEPENDENCY))
+        payload = sgrx.index_sources(args, runner, DEPENDENCY)
+        manifest = payload["manifest"]
+        self.assertTrue(manifest["consumer_index_shared"])
+        self.assertFalse(manifest["separate_graphs"])
+        self.assertEqual(manifest["consumer_graph_path"], manifest["graph_path"])
+        self.assertEqual(len(manifest["commands"]), 5)
 
     def test_changed_source_gets_a_new_isolated_gitnexus_alias(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -285,6 +415,7 @@ class WorkflowTests(unittest.TestCase):
             second = sgrx.index_sources(args, FakeIndexRunner(), source)
             self.assertNotEqual(first["manifest"]["gitnexus_alias"], second["manifest"]["gitnexus_alias"])
             self.assertNotEqual(first["manifest"]["gitnexus_source"], second["manifest"]["gitnexus_source"])
+            self.assertNotEqual(first["manifest"]["graph_path"], second["manifest"]["graph_path"])
 
     def test_version_comparison_uses_source_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,6 +429,47 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["changed"], ["same.py"])
         self.assertEqual(result["added"], ["added.py"])
         self.assertEqual(result["removed"], [])
+
+    def test_version_comparison_emits_classified_file_evidence(self):
+        evidence = sgrx.comparison_evidence(
+            {"added": ["new.py"], "removed": [], "changed": ["api.py"]},
+            "1.0.0",
+            "2.0.0",
+            [{}, {}],
+        )
+        self.assertEqual([item["path"] for item in evidence], ["new.py", "api.py"])
+        self.assertTrue(all(item["evidence_status"] == "EXTRACTED" for item in evidence))
+        self.assertTrue(all(item["confidence"] == 1.0 for item in evidence))
+
+    def test_large_same_size_source_change_updates_identity_and_comparison(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            left = root / "left"
+            right = root / "right"
+            left.mkdir(); right.mkdir()
+            size = 2_000_001
+            (left / "large.py").write_bytes(b"a" * size)
+            (right / "large.py").write_bytes(b"b" * size)
+            self.assertNotEqual(sgrx.source_tree_identity(left), sgrx.source_tree_identity(right))
+            self.assertEqual(sgrx.compare_source_trees(left, right)["changed"], ["large.py"])
+
+    def test_graph_query_terms_use_camel_case_and_constrained_intent_expansion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            graph = Path(directory) / "graph.json"
+            graph.write_text(json.dumps({
+                "nodes": [
+                    {"label": "ResearchIndexes"},
+                    {"label": "Architecture"},
+                    {"label": "SafetyValidation"},
+                    {"label": "CommandRunner"},
+                ]
+            }), encoding="utf-8")
+            terms = sgrx.graph_query_terms(graph, "Wie können wir Wartbarkeit und Sicherheit verbessern?")
+        self.assertIn("architecture", terms)
+        self.assertIn("safety", terms)
+        self.assertIn("validation", terms)
+        self.assertIn("command", terms)
+        self.assertNotIn("wie", terms)
 
     def test_cli_dry_run_json(self):
         output = io.StringIO()

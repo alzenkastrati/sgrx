@@ -18,18 +18,51 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from sgrx_research import (  # noqa: E402
+    ResearchError,
+    build_plan_markdown,
+    load_candidates,
+    research_slug,
+    select_with_budget,
+)
+
 
 BRAND = "SGRX — Source Graph Research eXplorer"
-VERSION = "0.2.1"
+VERSION = "0.4.1"
 EVIDENCE_STATUSES = ("EXTRACTED", "INFERRED", "AMBIGUOUS")
 MODES = ("quick", "standard", "deep")
 REGISTRIES = ("npm", "pypi", "crates", "github")
 MAX_OUTPUT = 200_000
+HASH_CHUNK_SIZE = 1024 * 1024
+WINDOWS_LONG_PATH_PATTERN = re.compile(r"(?:filename|path) too long|long path", re.I)
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".mjs", ".py", ".rs", ".ts", ".tsx"}
+RESEARCH_CODE_SUFFIXES = SOURCE_SUFFIXES | {".bash", ".fish", ".kt", ".kts", ".php", ".rb", ".scala", ".sh", ".swift", ".vue"}
 SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc", "credentials", "credentials.json", "id_rsa", "id_ed25519"}
+QUERY_INTENT_EXPANSIONS = {
+    "improve": ("analyze", "architecture", "quality", "research", "safety", "validation"),
+    "improvement": ("analyze", "architecture", "quality", "research", "safety", "validation"),
+    "verbessern": ("analyze", "architecture", "quality", "research", "safety", "validation"),
+    "verbesserung": ("analyze", "architecture", "quality", "research", "safety", "validation"),
+    "correctness": ("identity", "provenance", "validation"),
+    "korrektheit": ("identity", "provenance", "validation"),
+    "maintainability": ("architecture", "command", "module"),
+    "wartbarkeit": ("architecture", "command", "module"),
+    "sicherheit": ("safety", "security", "validation"),
+    "testing": ("test", "tests", "validation"),
+    "testen": ("test", "tests", "validation"),
+}
+QUERY_STOPWORDS = {
+    "and", "are", "can", "does", "for", "from", "how", "into", "the", "this", "what", "with",
+    "das", "der", "die", "ist", "kann", "können", "mit", "und", "was", "wie", "wir",
+}
 PACKAGE_PATTERNS = {
     "npm": re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$", re.I),
     "pypi": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:==[A-Za-z0-9][A-Za-z0-9._+!-]*)?$"),
@@ -66,6 +99,15 @@ class CommandResult:
         return self.returncode == 0 and not self.timed_out and not self.missing
 
 
+def is_windows() -> bool:
+    """Return whether SGRX is running on Windows.
+
+    This wrapper avoids mutating interpreter-global ``os.name`` in tests.
+    """
+
+    return os.name == "nt"
+
+
 class CommandRunner:
     """Run allow-listed CLI argument vectors without a shell."""
 
@@ -95,6 +137,10 @@ class CommandRunner:
         process_env = os.environ.copy()
         if env:
             process_env.update({str(key): str(value) for key, value in env.items()})
+        if is_windows():
+            result = self._run_windows_process_tree(executed, cwd, process_env)
+            self.history.append(result)
+            return result
         try:
             completed = subprocess.run(
                 executed,
@@ -127,10 +173,64 @@ class CommandRunner:
         self.history.append(result)
         return result
 
+    def _run_windows_process_tree(
+        self,
+        executed: list[str],
+        cwd: Path | None,
+        process_env: Mapping[str, str],
+    ) -> CommandResult:
+        """Terminate the complete SGRX-owned process tree when a Windows tool times out."""
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            process = subprocess.Popen(
+                executed,
+                cwd=str(cwd) if cwd else None,
+                env=dict(process_env),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+                creationflags=creationflags,
+            )
+        except FileNotFoundError:
+            return CommandResult(executed, 127, stderr=f"Tool not found: {executed[0]}", missing=True)
+        try:
+            stdout, stderr = process.communicate(timeout=self.timeout)
+            return CommandResult(executed, process.returncode, stdout[: self.max_output], stderr[: self.max_output])
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_windows_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            stdout = _bounded(stdout or exc.stdout, self.max_output)
+            stderr = _bounded(stderr or exc.stderr, self.max_output)
+            return CommandResult(executed, None, stdout, stderr, timed_out=True)
+
+    @staticmethod
+    def _terminate_windows_process_tree(process: subprocess.Popen[str]) -> None:
+        """Kill only the process tree rooted at an SGRX-created child process."""
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+                shell=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            process.kill()
+
 
 def _platform_vector(vector: list[str]) -> list[str]:
     """Adapt Windows PowerShell command shims without enabling a shell."""
-    if os.name != "nt":
+    if not is_windows():
         return vector
     resolved = shutil.which(vector[0])
     if not resolved:
@@ -198,10 +298,22 @@ def is_sensitive_name(name: str) -> bool:
     return lower in SENSITIVE_NAMES or lower.startswith(".env.") or lower.endswith((".pem", ".key"))
 
 
+def _update_digest_from_file(digest: Any, path: Path) -> None:
+    with path.open("rb") as stream:
+        while chunk := stream.read(HASH_CHUNK_SIZE):
+            digest.update(chunk)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    _update_digest_from_file(digest, path)
+    return digest.hexdigest()
+
+
 def source_tree_identity(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or is_sensitive_name(path.name):
+        if path.is_symlink() or not path.is_file() or is_sensitive_name(path.name):
             continue
         relative = path.relative_to(root)
         if any(part in {".git", ".gitnexus", ".sgrx", "graphify-out", "node_modules", "target"} for part in relative.parts):
@@ -212,8 +324,7 @@ def source_tree_identity(root: Path) -> str:
             digest.update(b"\0")
             digest.update(str(stat.st_size).encode("ascii"))
             digest.update(b"\0")
-            if stat.st_size <= 2_000_000:
-                digest.update(path.read_bytes())
+            _update_digest_from_file(digest, path)
         except OSError:
             continue
     return digest.hexdigest()
@@ -251,11 +362,33 @@ def gitnexus_command(source: Path, alias: str) -> list[str]:
     ]
 
 
-def gitnexus_env(scope: Path, *, create: bool = True) -> dict[str, str]:
+def gitnexus_env(scope: Path, source: Path | None = None, *, create: bool = True) -> dict[str, str]:
     home = (scope / "gitnexus-home").resolve()
     if create:
         home.mkdir(parents=True, exist_ok=True)
-    return {"HOME": str(home), "USERPROFILE": str(home)}
+    environment = {"HOME": str(home), "USERPROFILE": str(home)}
+    if source is not None:
+        # The safe snapshot intentionally has no .git directory. Stop Git from
+        # walking into an unrelated parent worktree and reporting its commit.
+        environment["GIT_CEILING_DIRECTORIES"] = str(source.resolve().parent)
+    return environment
+
+
+def gitnexus_status_state(result: CommandResult) -> str:
+    if not result.ok:
+        return "ERROR"
+    text = f"{result.stdout}\n{result.stderr}".casefold()
+    if "not a git repository" in text:
+        return "ISOLATED"
+    if re.search(r"(?m)^status:\s*.*stale", text):
+        return "STALE"
+    if re.search(r"(?m)^status:\s*.*(?:up[ -]?to[ -]?date|healthy|current)", text):
+        return "HEALTHY"
+    return "UNKNOWN"
+
+
+def gitnexus_status_ok(result: CommandResult) -> bool:
+    return result.ok and gitnexus_status_state(result) in {"HEALTHY", "ISOLATED"}
 
 
 def _snapshot_ignore(directory: str, names: list[str]) -> set[str]:
@@ -278,6 +411,59 @@ def prepare_source_snapshot(source: Path, scope: Path, identity: str) -> Path:
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, snapshot, ignore=_snapshot_ignore)
     return snapshot
+
+
+def prepare_research_graph_snapshot(source: Path, scope: Path, identity: str) -> tuple[Path, int]:
+    """Copy only structurally extractable code for token-efficient research graphs."""
+    del scope  # Durable outputs stay scoped; Graphify ignores sources nested under `.sgrx`.
+    snapshot = (Path(tempfile.gettempdir()) / "sgrx-research-source" / identity[:24]).resolve()
+    if snapshot.is_dir():
+        count = sum(1 for path in snapshot.rglob("*") if path.is_file() and path.suffix.lower() in RESEARCH_CODE_SUFFIXES)
+        return snapshot, count
+    blocked = {".git", ".gitnexus", ".sgrx", "graphify-out", "node_modules", "target", "__pycache__"}
+    count = 0
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() not in RESEARCH_CODE_SUFFIXES:
+            continue
+        relative = path.relative_to(source)
+        if any(part in blocked for part in relative.parts) or is_sensitive_name(path.name):
+            continue
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        count += 1
+    return snapshot, count
+
+
+def graphify_token_usage(results: Iterable[CommandResult]) -> dict[str, int]:
+    input_tokens = 0
+    output_tokens = 0
+    for result in results:
+        if not result.args or "graphify" not in Path(result.args[0]).name.casefold() or "extract" not in result.args:
+            continue
+        match = re.search(r"tokens:\s*([\d,]+)\s+in\s*/\s*([\d,]+)\s+out", result.stdout, re.I)
+        if match:
+            input_tokens += int(match.group(1).replace(",", ""))
+            output_tokens += int(match.group(2).replace(",", ""))
+    return {"input": input_tokens, "output": output_tokens}
+
+
+def opensrc_checkout_integrity(source: Path, runner: CommandRunner) -> dict[str, Any]:
+    """Reject a partially checked out OpenSrc Git cache without changing it."""
+    if not source.joinpath(".git").is_dir():
+        return {"status": "CACHE_SNAPSHOT", "usable": True, "details": None}
+    head = runner.run(["git", "-C", str(source), "rev-parse", "--verify", "HEAD^{commit}"])
+    status = runner.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"])
+    if not head.ok or not status.ok:
+        return {"status": "UNVERIFIED", "usable": False, "details": "Git could not verify the cached checkout."}
+    changed = [line for line in status.stdout.splitlines() if line.strip()]
+    if changed:
+        return {
+            "status": "DIRTY_OR_INCOMPLETE",
+            "usable": False,
+            "details": f"Git reported {len(changed)} tracked checkout differences; the cache may be incomplete.",
+        }
+    return {"status": "VERIFIED_CLEAN", "usable": True, "details": None, "commit": head.stdout.strip().lower()}
 
 
 def tool_specs() -> dict[str, list[str]]:
@@ -337,6 +523,28 @@ def locate_source(output: str, *, cache_root: Path | None = None) -> Path | None
         if resolved.is_dir() and resolved.is_relative_to(allowed_root):
             return resolved
     return None
+
+
+def is_windows_long_path_failure(result: CommandResult) -> bool:
+    return is_windows() and not result.ok and bool(WINDOWS_LONG_PATH_PATTERN.search(f"{result.stdout}\n{result.stderr}"))
+
+
+def windows_long_path_recovery_root(project: Path, command: Sequence[str]) -> Path:
+    identity = hashlib.sha256("\0".join(command).encode("utf-8")).hexdigest()[:16]
+    return (Path(tempfile.gettempdir()) / "sgrx-opensrc" / identity).resolve()
+
+
+def retry_opensrc_with_long_paths(command: Sequence[str], project: Path, runner: CommandRunner) -> tuple[CommandResult, Path | None, Path]:
+    """Fetch into a short SGRX-owned cache with Windows long paths enabled per process."""
+    cache_root = windows_long_path_recovery_root(project, command)
+    environment = {
+        "OPENSRC_HOME": str(cache_root),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
+    }
+    result = runner.run(command, cwd=project, env=environment)
+    return result, (locate_source(result.stdout, cache_root=cache_root) if result.ok else None), cache_root
 
 
 def lockfile_for(project: Path, registry: str) -> str | None:
@@ -451,6 +659,18 @@ def resolve_dependency(args: argparse.Namespace, runner: CommandRunner) -> dict[
     command = command_for_opensrc(package, args.registry, project, ref)
     result = runner.run(command, cwd=project)
     source_path = locate_source(result.stdout) if result.ok else None
+    attempts = [result_payload(result)]
+    recovery: dict[str, Any] | None = None
+    if is_windows_long_path_failure(result):
+        retry, recovered_source, cache_root = retry_opensrc_with_long_paths(command, project, runner)
+        attempts.append(result_payload(retry))
+        result = retry
+        source_path = recovered_source
+        recovery = {
+            "reason": "windows_long_path",
+            "cache_root": str(cache_root),
+            "succeeded": recovered_source is not None,
+        }
     version = package_version(package, args.registry, ref) or lockfile_version(project, package, args.registry)
     commit = None
     if source_path and (source_path / ".git").exists():
@@ -467,9 +687,11 @@ def resolve_dependency(args: argparse.Namespace, runner: CommandRunner) -> dict[
         "lockfile": lockfile_for(project, args.registry),
         "cache_path": str(source_path) if source_path else None,
         "timestamp": utc_now(),
-        "resolution_status": "DRY_RUN" if result.dry_run else ("RESOLVED" if source_path else "UNRESOLVED"),
+        "resolution_status": "DRY_RUN" if result.dry_run else ("RESOLVED_LONG_PATH_RECOVERY" if recovery and source_path else ("RESOLVED" if source_path else "UNRESOLVED")),
         "tool_versions": {"opensrc": None, "graphify": None, "gitnexus": None},
         "tool_result": result_payload(result),
+        "attempts": attempts,
+        "recovery": recovery,
     }
 
 
@@ -501,59 +723,30 @@ def local_source_provenance(args: argparse.Namespace, runner: CommandRunner) -> 
     }
 
 
-def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: Path | None = None) -> dict[str, Any]:
-    project = Path(args.project).expanduser().resolve()
-    package = validate_package(args.package, args.registry)
-    version = (
-        getattr(args, "version", None)
-        or getattr(args, "ref", None)
-        or package_version(package, args.registry, None)
-    )
-    scope = artifact_dir(project, package, version)
-    source = source_path or (Path(args.source_path).expanduser().resolve() if getattr(args, "source_path", None) else None)
-    if source is None or (not runner.dry_run and not source.is_dir()):
-        return {"status": "UNAVAILABLE", "reason": "No dependency source path was resolved.", "artifact_dir": str(scope), "commands": []}
-    alias_base = safe_slug(package, version)
-    graph_scope = scope / "graphify"
-    if not runner.dry_run:
-        scope.mkdir(parents=True, exist_ok=True)
-    manifest_path = scope / "index-manifest.json"
-    source_identity = "dry-run" if runner.dry_run else source_tree_identity(source)
-    alias = f"{alias_base}-{source_identity[:8]}"
-    fingerprint = hashlib.sha256(f"{source}|{version}|{args.mode}|{source_identity}".encode()).hexdigest()
-    stale_index_detected = False
-    if manifest_path.is_file() and not getattr(args, "force", False):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            graph_path = Path(manifest.get("graph_path", ""))
-            snapshot_path = Path(manifest.get("gitnexus_source", ""))
-            if (
-                manifest.get("fingerprint") == fingerprint
-                and manifest.get("status") in {"HEALTHY", "DEGRADED"}
-                and graph_path.is_file()
-                and snapshot_path.is_dir()
-            ):
-                return {"status": "REUSED", "artifact_dir": str(scope), "manifest": manifest, "commands": [], "stale_index_detected": False}
-            stale_index_detected = True
-        except (OSError, json.JSONDecodeError):
-            stale_index_detected = True
-    before = len(runner.history)
-    snapshot = source if runner.dry_run else prepare_source_snapshot(source, scope, source_identity)
-    nexus_environment = gitnexus_env(scope, create=not runner.dry_run)
+def _run_isolated_index(
+    *,
+    role: str,
+    source: Path,
+    identity: str,
+    alias: str,
+    scope: Path,
+    project: Path,
+    mode: str,
+    allow_global_graph: bool,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    role_scope = scope if role == "dependency" else scope / role
+    graph_scope = role_scope / "graphify" / identity[:16]
+    snapshot = source if runner.dry_run else prepare_source_snapshot(source, role_scope, identity)
+    environment = gitnexus_env(scope, snapshot, create=not runner.dry_run)
     graph = runner.run(
-        graphify_command(
-            source,
-            graph_scope,
-            args.mode,
-            allow_global=args.allow_global_graph,
-            alias=alias,
-        ),
+        graphify_command(source, graph_scope, mode, allow_global=allow_global_graph, alias=alias),
         cwd=scope if not runner.dry_run else project,
     )
     nexus = runner.run(
         gitnexus_command(snapshot, alias),
         cwd=snapshot if not runner.dry_run else project,
-        env=nexus_environment,
+        env=environment,
     )
     graph_path = graph_scope / "graphify-out" / "graph.json"
     graph_health = runner.run(
@@ -563,67 +756,162 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
     nexus_status = runner.run(
         ["npx", "--no-install", "gitnexus", "status"],
         cwd=snapshot if not runner.dry_run else project,
-        env=nexus_environment,
+        env=environment,
     )
     nexus_search = runner.run(
         ["npx", "--no-install", "gitnexus", "query", "main", "--repo", alias, "--limit", "1"],
         cwd=snapshot if not runner.dry_run else project,
-        env=nexus_environment,
+        env=environment,
     )
-    group_results: list[CommandResult] = []
-    if args.allow_gitnexus_group:
-        group_results.append(runner.run(
-            ["npx", "--no-install", "gitnexus", "group", "create", alias],
-            cwd=snapshot if not runner.dry_run else project,
-            env=nexus_environment,
-        ))
-        group_results.append(runner.run(
-            ["npx", "--no-install", "gitnexus", "group", "add", alias, "dependency", alias],
-            cwd=snapshot if not runner.dry_run else project,
-            env=nexus_environment,
-        ))
-        group_results.append(runner.run(
-            ["npx", "--no-install", "gitnexus", "group", "sync", alias, "--skip-embeddings", "--json"],
-            cwd=snapshot if not runner.dry_run else project,
-            env=nexus_environment,
-        ))
-    source_unchanged = True if runner.dry_run else source_tree_identity(source) == source_identity
+    source_unchanged = True if runner.dry_run else source_tree_identity(source) == identity
     nexus_index_exists = runner.dry_run or (snapshot / ".gitnexus").is_dir()
     graph_exists = runner.dry_run or graph_path.is_file()
-    search_warning = "warning" in (nexus_search.stdout or "").lower()
-    group_ok = not args.allow_gitnexus_group or all(result.ok for result in group_results)
+    search_warning = "warning" in f"{nexus_search.stdout}\n{nexus_search.stderr}".casefold()
+    status_state = "DRY_RUN" if runner.dry_run else gitnexus_status_state(nexus_status)
+    status_ok = True if runner.dry_run else gitnexus_status_ok(nexus_status)
     if runner.dry_run:
         status = "DRY_RUN"
-    elif not (graph.ok and nexus.ok and graph_exists and nexus_index_exists and source_unchanged and group_ok):
+    elif not (graph.ok and nexus.ok and graph_exists and nexus_index_exists and source_unchanged):
         status = "PARTIAL"
-    elif graph_health.ok and nexus_status.ok and nexus_search.ok and not search_warning:
+    elif graph_health.ok and status_ok and nexus_search.ok and not search_warning:
+        status = "HEALTHY"
+    else:
+        status = "DEGRADED"
+    return {
+        "role": role,
+        "status": status,
+        "source_path": str(source),
+        "source_identity": identity,
+        "graph_path": str(graph_path),
+        "gitnexus_source": str(snapshot),
+        "gitnexus_alias": alias,
+        "gitnexus_home": environment["HOME"],
+        "health": {
+            "graph_exists": graph_exists,
+            "graph_diagnostics_ok": graph_health.ok,
+            "gitnexus_index_exists": nexus_index_exists,
+            "gitnexus_status_ok": status_ok,
+            "gitnexus_status_state": status_state,
+            "gitnexus_search_ok": nexus_search.ok and not search_warning,
+            "source_unchanged": source_unchanged,
+        },
+    }
+
+
+def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: Path | None = None) -> dict[str, Any]:
+    project = Path(args.project).expanduser().resolve()
+    package = validate_package(args.package, args.registry)
+    version = getattr(args, "version", None) or getattr(args, "ref", None) or package_version(package, args.registry, None)
+    scope = artifact_dir(project, package, version)
+    source = source_path or (Path(args.source_path).expanduser().resolve() if getattr(args, "source_path", None) else None)
+    if source is None or (not runner.dry_run and not source.is_dir()):
+        return {"status": "UNAVAILABLE", "reason": "No dependency source path was resolved.", "artifact_dir": str(scope), "commands": []}
+    if not runner.dry_run and not project.is_dir():
+        return {"status": "UNAVAILABLE", "reason": "Consumer project does not exist.", "artifact_dir": str(scope), "commands": []}
+    if not runner.dry_run:
+        scope.mkdir(parents=True, exist_ok=True)
+    manifest_path = scope / "index-manifest.json"
+    dependency_identity = "dry-run" if runner.dry_run else source_tree_identity(source)
+    consumer_identity = dependency_identity if source == project else ("dry-run" if runner.dry_run else source_tree_identity(project))
+    shared_consumer_index = source == project
+    alias_base = safe_slug(package, version)
+    dependency_alias = f"{alias_base}-{dependency_identity[:8]}"
+    consumer_alias = dependency_alias if shared_consumer_index else f"consumer-{safe_slug(project.name, None)}-{consumer_identity[:8]}"
+    fingerprint = hashlib.sha256(
+        f"{source}|{project}|{version}|{args.mode}|{dependency_identity}|{consumer_identity}".encode()
+    ).hexdigest()
+    stale_index_detected = False
+    if manifest_path.is_file() and not getattr(args, "force", False):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            required_paths = [
+                Path(manifest.get("graph_path", "")),
+                Path(manifest.get("gitnexus_source", "")),
+                Path(manifest.get("consumer_graph_path", "")),
+                Path(manifest.get("consumer_gitnexus_source", "")),
+            ]
+            if (
+                manifest.get("fingerprint") == fingerprint
+                and manifest.get("status") in {"HEALTHY", "DEGRADED"}
+                and required_paths[0].is_file()
+                and required_paths[1].is_dir()
+                and required_paths[2].is_file()
+                and required_paths[3].is_dir()
+            ):
+                return {"status": "REUSED", "artifact_dir": str(scope), "manifest": manifest, "commands": [], "stale_index_detected": False}
+            stale_index_detected = True
+        except (OSError, json.JSONDecodeError):
+            stale_index_detected = True
+    before = len(runner.history)
+    dependency = _run_isolated_index(
+        role="dependency", source=source, identity=dependency_identity, alias=dependency_alias,
+        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph, runner=runner,
+    )
+    consumer = dependency if shared_consumer_index else _run_isolated_index(
+        role="consumer", source=project, identity=consumer_identity, alias=consumer_alias,
+        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph, runner=runner,
+    )
+    group_alias = f"{alias_base}-group"
+    group_results: list[CommandResult] = []
+    group_environment = gitnexus_env(scope, Path(dependency["gitnexus_source"]), create=not runner.dry_run)
+    group_cwd = Path(dependency["gitnexus_source"]) if not runner.dry_run else project
+    if args.allow_gitnexus_group:
+        group_results.append(runner.run(
+            ["npx", "--no-install", "gitnexus", "group", "create", group_alias], cwd=group_cwd, env=group_environment,
+        ))
+        if not shared_consumer_index:
+            group_results.append(runner.run(
+                ["npx", "--no-install", "gitnexus", "group", "add", group_alias, "consumer", consumer_alias],
+                cwd=group_cwd, env=group_environment,
+            ))
+        group_results.append(runner.run(
+            ["npx", "--no-install", "gitnexus", "group", "add", group_alias, "dependency", dependency_alias],
+            cwd=group_cwd, env=group_environment,
+        ))
+        group_results.append(runner.run(
+            ["npx", "--no-install", "gitnexus", "group", "sync", group_alias, "--skip-embeddings", "--json"],
+            cwd=group_cwd, env=group_environment,
+        ))
+    group_ok = not args.allow_gitnexus_group or all(result.ok for result in group_results)
+    role_statuses = {dependency["status"], consumer["status"]}
+    if runner.dry_run:
+        status = "DRY_RUN"
+    elif "PARTIAL" in role_statuses or not group_ok:
+        status = "PARTIAL"
+    elif role_statuses == {"HEALTHY"}:
         status = "HEALTHY"
     else:
         status = "DEGRADED"
     health = {
-        "graph_exists": graph_exists,
-        "graph_diagnostics_ok": graph_health.ok,
-        "gitnexus_index_exists": nexus_index_exists,
-        "gitnexus_status_ok": nexus_status.ok,
-        "gitnexus_search_ok": nexus_search.ok and not search_warning,
-        "source_unchanged": source_unchanged,
+        **dependency["health"],
+        "consumer": consumer["health"],
+        "dependency": dependency["health"],
+        "consumer_index_shared": shared_consumer_index,
         "gitnexus_group_ok": group_ok,
     }
     manifest = {
         "fingerprint": fingerprint,
         "status": status,
-        "source_path": str(source),
-        "graph_path": str(graph_path),
-        "gitnexus_source": str(snapshot),
-        "gitnexus_alias": alias,
-        "gitnexus_home": nexus_environment["HOME"],
-        "separate_graphs": not args.allow_global_graph,
+        "source_path": dependency["source_path"],
+        "graph_path": dependency["graph_path"],
+        "gitnexus_source": dependency["gitnexus_source"],
+        "gitnexus_alias": dependency_alias,
+        "gitnexus_home": dependency["gitnexus_home"],
+        "consumer_source_path": consumer["source_path"],
+        "consumer_graph_path": consumer["graph_path"],
+        "consumer_gitnexus_source": consumer["gitnexus_source"],
+        "consumer_gitnexus_alias": consumer_alias,
+        "consumer_index_shared": shared_consumer_index,
+        "separate_graphs": not args.allow_global_graph and not shared_consumer_index,
         "global_graph_opt_in": bool(args.allow_global_graph),
         "gitnexus_group_opt_in": bool(args.allow_gitnexus_group),
+        "gitnexus_group_alias": group_alias if args.allow_gitnexus_group else None,
         "timestamp": utc_now(),
-        "source_identity": source_identity,
+        "source_identity": dependency_identity,
+        "consumer_source_identity": consumer_identity,
         "stale_index_detected": stale_index_detected,
         "health": health,
+        "indexes": {"consumer": consumer, "dependency": dependency},
         "commands": command_log(runner.history[before:]),
     }
     if not runner.dry_run:
@@ -679,7 +967,7 @@ def scan_consumer(project: Path, package: str) -> list[dict[str, Any]]:
 def source_fingerprints(root: Path) -> dict[str, str]:
     fingerprints: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         relative = path.relative_to(root)
         if any(part in {".git", ".gitnexus", ".sgrx", "graphify-out", "node_modules", "target"} for part in relative.parts):
@@ -687,9 +975,7 @@ def source_fingerprints(root: Path) -> dict[str, str]:
         if is_sensitive_name(path.name):
             continue
         try:
-            if path.stat().st_size > 2_000_000:
-                continue
-            fingerprints[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+            fingerprints[relative.as_posix()] = file_sha256(path)
         except OSError:
             continue
     return fingerprints
@@ -703,6 +989,43 @@ def compare_source_trees(left: Path, right: Path) -> dict[str, list[str]]:
         "removed": sorted(old.keys() - new.keys()),
         "changed": sorted(path for path in old.keys() & new.keys() if old[path] != new[path]),
     }
+
+
+def comparison_evidence(
+    differences: Mapping[str, Sequence[str]],
+    from_version: str,
+    to_version: str,
+    research: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence = [
+        {
+            "kind": "source_file_difference",
+            "change": change,
+            "path": path,
+            "from_version": from_version,
+            "to_version": to_version,
+            "evidence_status": "EXTRACTED",
+            "confidence": 1.0,
+            "uncertainties": "This proves a source-content difference, not a behavioral change.",
+        }
+        for change in ("added", "removed", "changed")
+        for path in differences.get(change, [])
+    ]
+    if len(research) == 2:
+        old_nodes = {str(node.get("label")) for node in research[0].get("graph_nodes", []) if node.get("label")}
+        new_nodes = {str(node.get("label")) for node in research[1].get("graph_nodes", []) if node.get("label")}
+        for change, labels in (("graph_node_added", new_nodes - old_nodes), ("graph_node_removed", old_nodes - new_nodes)):
+            evidence.extend({
+                "kind": "graph_query_difference",
+                "change": change,
+                "label": label,
+                "from_version": from_version,
+                "to_version": to_version,
+                "evidence_status": "AMBIGUOUS",
+                "confidence": 0.4,
+                "uncertainties": "Query-result presence is relevance evidence and does not prove an API or runtime change.",
+            } for label in sorted(labels))
+    return evidence
 
 
 def _api_hint(line: str, package: str) -> str | None:
@@ -721,12 +1044,28 @@ def _api_hint(line: str, package: str) -> str | None:
     return None
 
 
-def _json_output(result: CommandResult) -> dict[str, Any]:
+def _json_output_with_error(result: CommandResult) -> tuple[dict[str, Any], str | None]:
+    if not result.stdout.strip():
+        return {}, "tool returned no JSON output"
     try:
         value = json.loads(result.stdout)
-        return value if isinstance(value, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON output at line {exc.lineno}, column {exc.colno}"
+    if not isinstance(value, dict):
+        return {}, "JSON output was not an object"
+    return value, None
+
+
+def _json_output(result: CommandResult) -> dict[str, Any]:
+    return _json_output_with_error(result)[0]
+
+
+def _graph_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    for word in re.findall(r"[^\W\d_]+", value, re.UNICODE):
+        parts = re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+", word) or [word]
+        tokens.extend(part.lower() for part in parts if 3 <= len(part) <= 30)
+    return tokens
 
 
 def graph_query_terms(graph_path: Path, question: str, hints: Iterable[str | None] = ()) -> list[str]:
@@ -736,11 +1075,27 @@ def graph_query_terms(graph_path: Path, question: str, hints: Iterable[str | Non
         return []
     vocabulary: set[str] = set()
     for node in data.get("nodes", []):
-        label = str(node.get("label", ""))
-        vocabulary.update(token.lower() for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,29}", label))
-    requested = [token.lower() for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,29}", question)]
-    requested.extend(str(hint).lower() for hint in hints if hint)
-    return list(dict.fromkeys(token for token in requested if token in vocabulary))[:12]
+        vocabulary.update(_graph_tokens(str(node.get("label", ""))))
+    requested = [token for token in _graph_tokens(question) if token not in QUERY_STOPWORDS]
+    for hint in hints:
+        if hint:
+            requested.extend(token for token in _graph_tokens(str(hint)) if token not in QUERY_STOPWORDS)
+    expanded = list(requested)
+    for token in requested:
+        expanded.extend(QUERY_INTENT_EXPANSIONS.get(token, ()))
+    return list(dict.fromkeys(token for token in expanded if token in vocabulary))[:12]
+
+
+def _parse_graph_query_nodes(result: CommandResult | None) -> tuple[list[dict[str, Any]], str | None]:
+    if result is None or not result.ok:
+        return [], None
+    nodes = [
+        {"label": match.group(1), "source": match.group(2), "location": match.group(3)}
+        for match in re.finditer(r"(?m)^NODE (.+?) \[src=(.*?) loc=(.*?) community=", result.stdout)
+    ]
+    if result.stdout.strip() and not nodes:
+        return [], "Graphify query output contained no parseable structured node lines."
+    return nodes, None
 
 
 def research_indexes(
@@ -755,24 +1110,44 @@ def research_indexes(
     alias = manifest.get("gitnexus_alias")
     snapshot = Path(manifest.get("gitnexus_source", ""))
     home = Path(manifest.get("gitnexus_home", ""))
+    consumer_graph_path = Path(manifest.get("consumer_graph_path", ""))
+    consumer_alias = manifest.get("consumer_gitnexus_alias")
+    consumer_snapshot = Path(manifest.get("consumer_gitnexus_source", ""))
+    consumer_shared = bool(manifest.get("consumer_index_shared"))
     hints = [row.get("public_api") for row in evidence]
     terms = graph_query_terms(graph_path, question, hints)
+    consumer_terms = terms if consumer_shared else graph_query_terms(consumer_graph_path, question, hints)
     graph_result = None
+    consumer_graph_result = None
+    parse_errors: list[str] = []
     if terms and graph_path.is_file():
         graph_result = runner.run(
             ["graphify", "query", " ".join(terms), "--graph", str(graph_path), "--budget", "3000" if mode == "deep" else "1800"],
             cwd=graph_path.parent.parent,
         )
-    graph_nodes: list[dict[str, Any]] = []
-    if graph_result and graph_result.ok:
-        for match in re.finditer(r"(?m)^NODE (.+?) \[src=(.*?) loc=(.*?) community=", graph_result.stdout):
-            graph_nodes.append({"label": match.group(1), "source": match.group(2), "location": match.group(3)})
+    if not consumer_shared and consumer_terms and consumer_graph_path.is_file():
+        consumer_graph_result = runner.run(
+            ["graphify", "query", " ".join(consumer_terms), "--graph", str(consumer_graph_path), "--budget", "3000" if mode == "deep" else "1800"],
+            cwd=consumer_graph_path.parent.parent,
+        )
+    graph_nodes, graph_error = _parse_graph_query_nodes(graph_result)
+    consumer_graph_nodes, consumer_graph_error = (
+        (graph_nodes, graph_error) if consumer_shared else _parse_graph_query_nodes(consumer_graph_result)
+    )
+    if graph_error:
+        parse_errors.append(f"Dependency {graph_error}")
+    if consumer_graph_error:
+        parse_errors.append(f"Consumer {consumer_graph_error}")
     nexus_result = None
+    consumer_nexus_result = None
+    group_result = None
     nexus_payload: dict[str, Any] = {}
+    consumer_nexus_payload: dict[str, Any] = {}
+    group_payload: dict[str, Any] = {}
     contexts: list[dict[str, Any]] = []
     change_risk: dict[str, Any] = {"status": "NOT_REQUESTED", "risk": "UNKNOWN", "direct_callers": [], "processes": []}
     if alias and snapshot.is_dir() and home:
-        environment = {"HOME": str(home), "USERPROFILE": str(home)}
+        environment = gitnexus_env(home.parent, snapshot, create=False)
         nexus_result = runner.run(
             [
                 "npx", "--no-install", "gitnexus", "query", question,
@@ -782,7 +1157,9 @@ def research_indexes(
             cwd=snapshot,
             env=environment,
         )
-        nexus_payload = _json_output(nexus_result)
+        nexus_payload, nexus_error = _json_output_with_error(nexus_result)
+        if nexus_error:
+            parse_errors.append(f"GitNexus query: {nexus_error}.")
         context_hints = list(dict.fromkeys(str(item) for item in hints if item))
         if not context_hints:
             for node in graph_nodes:
@@ -797,9 +1174,11 @@ def research_indexes(
                 cwd=snapshot,
                 env=environment,
             )
-            payload = _json_output(context_result)
+            payload, context_error = _json_output_with_error(context_result)
             if payload:
                 contexts.append(payload)
+            elif context_error:
+                parse_errors.append(f"GitNexus context {hint}: {context_error}.")
         if re.search(r"(?i)\b(change|modify|rename|break|impact|blast|ändern|änderung|umbenennen)\b", question) and context_hints:
             target = context_hints[0]
             for context in contexts:
@@ -812,7 +1191,7 @@ def research_indexes(
                 cwd=snapshot,
                 env=environment,
             )
-            impact = _json_output(impact_result)
+            impact, impact_error = _json_output_with_error(impact_result)
             if impact:
                 change_risk = {
                     "status": "ANALYZED",
@@ -821,14 +1200,49 @@ def research_indexes(
                     "processes": impact.get("affected_processes", []),
                     "raw": impact,
                 }
+            elif impact_error:
+                parse_errors.append(f"GitNexus impact {target}: {impact_error}.")
+        if not consumer_shared and consumer_alias and consumer_snapshot.is_dir():
+            consumer_environment = gitnexus_env(home.parent, consumer_snapshot, create=False)
+            consumer_nexus_result = runner.run(
+                [
+                    "npx", "--no-install", "gitnexus", "query", question,
+                    "--repo", str(consumer_alias), "--context", "Find consumer imports, wrappers, calls, and tests",
+                    "--goal", "Return evidence-bearing consumer definitions and execution flows", "--limit", "10",
+                ],
+                cwd=consumer_snapshot,
+                env=consumer_environment,
+            )
+            consumer_nexus_payload, consumer_error = _json_output_with_error(consumer_nexus_result)
+            if consumer_error:
+                parse_errors.append(f"Consumer GitNexus query: {consumer_error}.")
+        group_alias = manifest.get("gitnexus_group_alias")
+        if manifest.get("gitnexus_group_opt_in") and group_alias:
+            group_result = runner.run(
+                ["npx", "--no-install", "gitnexus", "group", "query", str(group_alias), question, "--limit", "10", "--json"],
+                cwd=snapshot,
+                env=environment,
+            )
+            group_payload, group_error = _json_output_with_error(group_result)
+            if group_error:
+                parse_errors.append(f"GitNexus group query: {group_error}.")
     return {
         "query_terms": terms,
+        "consumer_query_terms": consumer_terms,
+        "consumer_index_shared": consumer_shared,
         "graphify": result_payload(graph_result),
         "graph_nodes": graph_nodes,
+        "consumer_graphify": result_payload(graph_result if consumer_shared else consumer_graph_result),
+        "consumer_graph_nodes": consumer_graph_nodes,
         "gitnexus": result_payload(nexus_result),
         "gitnexus_payload": nexus_payload,
+        "consumer_gitnexus": result_payload(nexus_result if consumer_shared else consumer_nexus_result),
+        "consumer_gitnexus_payload": nexus_payload if consumer_shared else consumer_nexus_payload,
+        "gitnexus_group": result_payload(group_result),
+        "gitnexus_group_payload": group_payload,
         "contexts": contexts,
         "change_risk": change_risk,
+        "parse_errors": parse_errors,
     }
 
 
@@ -862,6 +1276,499 @@ def implementation_rows(
             "uncertainties": "The dependency symbol is extracted, but its connection to the consumer call site is not yet directly proven.",
         })
     return rows
+
+
+def _candidate_args(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update({
+        "registry": "github",
+        "ref": None,
+        "version": None,
+        "source_path": None,
+        "allow_global_graph": False,
+        "allow_gitnexus_group": False,
+        "force": getattr(args, "force", False),
+    })
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def _research_checkpoint_signature(kind: str, item: Mapping[str, Any], question: str, mode: str) -> str:
+    payload = json.dumps(
+        {"kind": kind, "item": item, "question": question, "mode": mode, "sgrx_version": VERSION},
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _checkpoint_reusable(kind: str, result: Mapping[str, Any]) -> bool:
+    if kind == "paper":
+        indexing = result.get("indexing", {})
+        return indexing.get("status") in {"HEALTHY", "PARTIAL"} and Path(str(indexing.get("graph_path", ""))).is_file()
+    indexing = result.get("indexing", {})
+    graph_path = Path(str(indexing.get("graph_path", "")))
+    nexus_source = Path(str(indexing.get("gitnexus_source", "")))
+    return (
+        indexing.get("status") in {"HEALTHY", "DEGRADED"}
+        and graph_path.is_file()
+        and nexus_source.joinpath(".gitnexus").is_dir()
+    )
+
+
+def _load_research_checkpoint(path: Path, signature: str, kind: str) -> dict[str, Any] | None:
+    try:
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    result = checkpoint.get("result")
+    if checkpoint.get("signature") != signature or not isinstance(result, dict) or not _checkpoint_reusable(kind, result):
+        return None
+    reused = dict(result)
+    reused["checkpoint"] = {"status": "REUSED", "path": str(path), "signature": signature}
+    return reused
+
+
+def _write_research_checkpoint(path: Path, signature: str, kind: str, result: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "1.0",
+        "kind": kind,
+        "signature": signature,
+        "saved_at": utc_now(),
+        "result": result,
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _research_progress(message: str, runner: CommandRunner) -> None:
+    if not runner.dry_run:
+        print(f"[SGRX research] {message}", file=sys.stderr, flush=True)
+
+
+def _run_research_index(
+    *,
+    source: Path,
+    identity: str,
+    alias: str,
+    scope: Path,
+    mode: str,
+    force: bool,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    """Resume Graphify and GitNexus independently for one research repository."""
+    role_scope = scope / "repository"
+    graph_scope = role_scope / "graphify" / identity[:16]
+    graph_path = graph_scope / "graphify-out" / "graph.json"
+    snapshot = role_scope / "gitnexus-source" / identity[:16]
+    graph_reused = graph_path.is_file() and not force
+    nexus_reused = snapshot.joinpath(".gitnexus").is_dir() and not force
+    graph_result: CommandResult | None = None
+    nexus_result: CommandResult | None = None
+    if not graph_reused:
+        graph_result = runner.run(graphify_command(source, graph_scope, mode), cwd=scope)
+    if not nexus_reused:
+        snapshot = prepare_source_snapshot(source, role_scope, identity)
+        environment = gitnexus_env(scope, snapshot)
+        nexus_result = runner.run(gitnexus_command(snapshot, alias), cwd=snapshot, env=environment)
+    environment = gitnexus_env(scope, snapshot)
+    graph_health = runner.run(
+        ["graphify", "diagnose", "multigraph", "--graph", str(graph_path), "--json"],
+        cwd=scope,
+    )
+    nexus_status = runner.run(
+        ["npx", "--no-install", "gitnexus", "status"],
+        cwd=snapshot,
+        env=environment,
+    )
+    nexus_search = runner.run(
+        ["npx", "--no-install", "gitnexus", "query", "main", "--repo", alias, "--limit", "1"],
+        cwd=snapshot,
+        env=environment,
+    )
+    source_unchanged = source_tree_identity(source) == identity
+    graph_exists = graph_path.is_file()
+    nexus_index_exists = snapshot.joinpath(".gitnexus").is_dir()
+    search_warning = "warning" in f"{nexus_search.stdout}\n{nexus_search.stderr}".casefold()
+    status_state = gitnexus_status_state(nexus_status)
+    status_ok = gitnexus_status_ok(nexus_status)
+    attempted_ok = (graph_result is None or graph_result.ok) and (nexus_result is None or nexus_result.ok)
+    if not (attempted_ok and graph_exists and nexus_index_exists and source_unchanged):
+        status = "PARTIAL"
+    elif graph_health.ok and status_ok and nexus_search.ok and not search_warning:
+        status = "HEALTHY"
+    else:
+        status = "DEGRADED"
+    return {
+        "role": "repository",
+        "status": status,
+        "source_path": str(source),
+        "source_identity": identity,
+        "graph_path": str(graph_path),
+        "gitnexus_source": str(snapshot),
+        "gitnexus_alias": alias,
+        "gitnexus_home": environment["HOME"],
+        "resume": {"graphify_reused": graph_reused, "gitnexus_reused": nexus_reused},
+        "health": {
+            "graph_exists": graph_exists,
+            "graph_diagnostics_ok": graph_health.ok,
+            "gitnexus_index_exists": nexus_index_exists,
+            "gitnexus_status_ok": status_ok,
+            "gitnexus_status_state": status_state,
+            "gitnexus_search_ok": nexus_search.ok and not search_warning,
+            "source_unchanged": source_unchanged,
+        },
+    }
+
+
+def _paper_graph(
+    paper: Mapping[str, Any],
+    scope: Path,
+    question: str,
+    mode: str,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    source_value = paper.get("source_path")
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    materialization = "full_source"
+    try:
+        if source_value:
+            source = Path(str(source_value)).expanduser().resolve()
+            if not runner.dry_run and not source.exists():
+                return {"status": "UNAVAILABLE", "reason": f"Paper source does not exist: {source}", "graph_nodes": []}
+        else:
+            materialization = "metadata_abstract"
+            if runner.dry_run:
+                source = scope / "paper-metadata.md"
+            else:
+                temporary = tempfile.TemporaryDirectory(prefix="sgrx-paper-")
+                source = Path(temporary.name) / f"{safe_slug(str(paper['id']), None)}.md"
+                source.write_text(
+                    f"# {paper['title']}\n\nYear: {paper['year']}\n\n{paper.get('abstract') or 'Abstract unavailable.'}\n\nSource: {paper.get('url') or paper.get('pdf_url') or 'unknown'}\n",
+                    encoding="utf-8",
+                )
+        identity = "dry-run" if runner.dry_run else (file_sha256(source) if source.is_file() else source_tree_identity(source))
+        graph_source = source
+        if source.is_file():
+            if runner.dry_run:
+                graph_source = source.parent
+            else:
+                if temporary is None:
+                    temporary = tempfile.TemporaryDirectory(prefix="sgrx-paper-")
+                staged = Path(temporary.name) / source.name
+                if staged.resolve() != source.resolve():
+                    shutil.copy2(source, staged)
+                graph_source = Path(temporary.name)
+        graph_scope = scope / "graphify" / identity[:16]
+        graph = runner.run(graphify_command(graph_source, graph_scope, mode), cwd=scope.parent if runner.dry_run else scope)
+        graph_path = graph_scope / "graphify-out" / "graph.json"
+        health = runner.run(
+            ["graphify", "diagnose", "multigraph", "--graph", str(graph_path), "--json"],
+            cwd=scope.parent if runner.dry_run else scope,
+        )
+        terms = graph_query_terms(graph_path, question, paper.get("tags", [])) if graph_path.is_file() else []
+        query = runner.run(
+            ["graphify", "query", " ".join(terms), "--graph", str(graph_path), "--budget", "2400" if mode == "deep" else "1200"],
+            cwd=graph_scope,
+        ) if terms else None
+        nodes, parse_error = _parse_graph_query_nodes(query)
+        status = "DRY_RUN" if runner.dry_run else ("HEALTHY" if graph.ok and graph_path.is_file() and health.ok else "PARTIAL")
+        limitations = []
+        if materialization == "metadata_abstract":
+            limitations.append("Paper graph uses supplied metadata and abstract, not verified full text.")
+        if parse_error:
+            limitations.append(parse_error)
+        return {
+            "status": status,
+            "materialization": materialization,
+            "source_identity": identity,
+            "graph_path": str(graph_path),
+            "query_terms": terms,
+            "graph_nodes": nodes,
+            "graphify_tokens": graphify_token_usage([graph]),
+            "limitations": limitations,
+            "graphify": result_payload(graph),
+            "query": result_payload(query),
+        }
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
+
+
+def _repository_research(
+    repository: Mapping[str, Any],
+    scope: Path,
+    args: argparse.Namespace,
+    runner: CommandRunner,
+) -> dict[str, Any]:
+    spec = validate_package(str(repository["spec"]), "github")
+    local_source = repository.get("source_path")
+    repo_args = _candidate_args(args, package=spec, source_path=local_source)
+    if local_source:
+        provenance = local_source_provenance(repo_args, runner)
+    else:
+        provenance = resolve_dependency(repo_args, runner)
+    source = Path(provenance["cache_path"]) if provenance.get("cache_path") else None
+    planned_source = False
+    if source is None and runner.dry_run:
+        source = scope / "planned-resolved-source"
+        planned_source = True
+    if source is None or (not runner.dry_run and not source.is_dir()):
+        return {
+            **repository,
+            "provenance": provenance,
+            "indexing": {"status": "UNAVAILABLE"},
+            "research": {},
+            "graph_nodes": [],
+            "limitations": ["Repository source could not be resolved; no implementation evidence is asserted."],
+        }
+    integrity = {"status": "DRY_RUN", "usable": True, "details": None}
+    if not runner.dry_run and not local_source:
+        integrity = opensrc_checkout_integrity(source, runner)
+        if not integrity["usable"] and integrity["status"] == "DIRTY_OR_INCOMPLETE" and is_windows():
+            command = command_for_opensrc(spec, "github", Path(args.project).expanduser().resolve(), repo_args.ref)
+            retry, recovered_source, cache_root = retry_opensrc_with_long_paths(command, Path(args.project).expanduser().resolve(), runner)
+            provenance["attempts"] = [*provenance.get("attempts", []), result_payload(retry)]
+            provenance["recovery"] = {
+                "reason": "incomplete_opensrc_checkout",
+                "cache_root": str(cache_root),
+                "succeeded": recovered_source is not None,
+            }
+            if recovered_source is not None:
+                source = recovered_source
+                provenance["cache_path"] = str(source)
+                provenance["resolution_status"] = "RESOLVED_LONG_PATH_RECOVERY"
+                provenance["tool_result"] = result_payload(retry)
+                integrity = opensrc_checkout_integrity(source, runner)
+        provenance["source_integrity"] = integrity
+        if not integrity["usable"]:
+            return {
+                **repository,
+                "provenance": provenance,
+                "indexing": {"status": "UNAVAILABLE"},
+                "research": {},
+                "graph_nodes": [],
+                "source_profile": "rejected-incomplete-cache",
+                "indexed_file_count": 0,
+                "graphify_tokens": {"input": 0, "output": 0},
+                "limitations": [str(integrity["details"])],
+            }
+    elif local_source:
+        provenance["source_integrity"] = {"status": "USER_PROVIDED", "usable": True, "details": None}
+    source_identity = "dry-run" if runner.dry_run else source_tree_identity(source)
+    source_profile = "full-source"
+    indexed_file_count: int | None = None
+    research_source = source
+    profile_limitations: list[str] = []
+    if args.mode in {"quick", "standard"}:
+        source_profile = "code-only"
+        if runner.dry_run:
+            research_source = scope / "planned-code-source"
+        else:
+            research_source, indexed_file_count = prepare_research_graph_snapshot(source, scope, source_identity)
+            if indexed_file_count == 0:
+                source_profile = "full-source-fallback"
+                research_source = source
+                profile_limitations.append("No supported code files were found; Graphify used the full repository source.")
+    identity = "dry-run" if runner.dry_run else source_tree_identity(research_source)
+    alias = f"{safe_slug(spec, package_version(spec, 'github', None))}-{identity[:8]}"
+    before_index = len(runner.history)
+    if runner.dry_run:
+        indexed = _run_isolated_index(
+            role="repository",
+            source=research_source,
+            identity=identity,
+            alias=alias,
+            scope=scope,
+            project=Path(args.project).expanduser().resolve(),
+            mode=args.mode,
+            allow_global_graph=False,
+            runner=runner,
+        )
+    else:
+        indexed = _run_research_index(
+            source=research_source,
+            identity=identity,
+            alias=alias,
+            scope=scope,
+            mode=args.mode,
+            force=args.force,
+            runner=runner,
+        )
+    manifest = {
+        "graph_path": indexed["graph_path"],
+        "gitnexus_alias": indexed["gitnexus_alias"],
+        "gitnexus_source": indexed["gitnexus_source"],
+        "gitnexus_home": indexed["gitnexus_home"],
+        "consumer_graph_path": indexed["graph_path"],
+        "consumer_gitnexus_alias": indexed["gitnexus_alias"],
+        "consumer_gitnexus_source": indexed["gitnexus_source"],
+        "consumer_index_shared": True,
+        "gitnexus_group_opt_in": False,
+    }
+    focus_evidence = [{"public_api": term} for term in repository.get("focus_terms", [])]
+    research = research_indexes(
+        {"manifest": manifest},
+        args.question,
+        focus_evidence,
+        runner,
+        args.mode,
+    ) if indexed["status"] in {"HEALTHY", "DEGRADED"} else {}
+    limitations = list(research.get("parse_errors", []))
+    limitations.extend(profile_limitations)
+    if planned_source:
+        limitations.append("Dry-run planned repository resolution and isolated indexes with placeholder paths; no source was fetched.")
+    warning = research.get("gitnexus_payload", {}).get("warning")
+    if warning:
+        limitations.append(f"GitNexus warning: {warning}")
+    return {
+        **repository,
+        "provenance": provenance,
+        "indexing": indexed,
+        "research": research,
+        "graph_nodes": research.get("graph_nodes", []),
+        "source_profile": source_profile,
+        "indexed_file_count": indexed_file_count,
+        "graphify_tokens": graphify_token_usage(runner.history[before_index:]),
+        "limitations": limitations,
+    }
+
+
+def research_mode(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
+    project = Path(args.project).expanduser().resolve()
+    if not project.is_dir():
+        raise SGRXError(f"Consumer project does not exist: {project}")
+    candidate_path = Path(args.candidates).expanduser().resolve()
+    candidates = load_candidates(candidate_path)
+    question = args.question or candidates.get("question")
+    if not question:
+        raise SGRXError("Research question is required in --question or the candidates manifest.")
+    args.question = question
+    selection = select_with_budget(
+        candidates["papers"],
+        candidates["repositories"],
+        token_budget=args.token_budget,
+        max_papers=args.max_papers,
+        max_repositories=args.max_repositories,
+    )
+    scope = project / ".sgrx" / "research" / research_slug(question)
+    before = len(runner.history)
+    version_report = doctor(runner)
+    papers: list[dict[str, Any]] = []
+    for position, paper in enumerate(selection["selected_papers"], 1):
+        paper_scope = scope / "papers" / safe_slug(str(paper["id"]), None)
+        checkpoint_path = paper_scope / "checkpoint.json"
+        signature = _research_checkpoint_signature("paper", paper, question, args.mode)
+        cached = None if runner.dry_run or args.force else _load_research_checkpoint(checkpoint_path, signature, "paper")
+        if cached is not None:
+            _research_progress(f"paper {position}/{len(selection['selected_papers'])}: reused {paper['id']}", runner)
+            papers.append(cached)
+            continue
+        _research_progress(f"paper {position}/{len(selection['selected_papers'])}: indexing {paper['id']}", runner)
+        if not runner.dry_run:
+            paper_scope.mkdir(parents=True, exist_ok=True)
+        result = {**paper, "indexing": _paper_graph(paper, paper_scope, question, args.mode, runner)}
+        if not runner.dry_run and _checkpoint_reusable("paper", result):
+            _write_research_checkpoint(checkpoint_path, signature, "paper", result)
+            result["checkpoint"] = {"status": "SAVED", "path": str(checkpoint_path), "signature": signature}
+        papers.append(result)
+    repositories: list[dict[str, Any]] = []
+    for position, repository in enumerate(selection["selected_repositories"], 1):
+        repo_scope = scope / "repositories" / safe_slug(str(repository["spec"]), None)
+        checkpoint_path = repo_scope / "checkpoint.json"
+        signature = _research_checkpoint_signature("repository", repository, question, args.mode)
+        cached = None if runner.dry_run or args.force else _load_research_checkpoint(checkpoint_path, signature, "repository")
+        if cached is not None:
+            _research_progress(f"repository {position}/{len(selection['selected_repositories'])}: reused {repository['spec']}", runner)
+            repositories.append(cached)
+            continue
+        _research_progress(f"repository {position}/{len(selection['selected_repositories'])}: indexing {repository['spec']}", runner)
+        if not runner.dry_run:
+            repo_scope.mkdir(parents=True, exist_ok=True)
+        result = _repository_research(repository, repo_scope, args, runner)
+        if not runner.dry_run and _checkpoint_reusable("repository", result):
+            _write_research_checkpoint(checkpoint_path, signature, "repository", result)
+            result["checkpoint"] = {"status": "SAVED", "path": str(checkpoint_path), "signature": signature}
+        repositories.append(result)
+    paper_by_id = {paper["id"]: paper for paper in papers}
+    relationships: list[dict[str, Any]] = []
+    for repository in repositories:
+        for paper_id in repository.get("paper_ids", []):
+            paper = paper_by_id.get(paper_id)
+            if not paper:
+                continue
+            extracted = bool(repository.get("official")) and repository.get("evidence_status") == "EXTRACTED"
+            relationships.append({
+                "paper_id": paper_id,
+                "repository": repository["spec"],
+                "relationship": "implements_or_accompanies",
+                "evidence_status": "EXTRACTED" if extracted else "AMBIGUOUS",
+                "confidence": 0.95 if extracted else 0.45,
+                "uncertainty": "Official linkage supplied by discovery evidence." if extracted else "Verify the link from the paper or official repository metadata.",
+            })
+    limitations = [
+        limitation
+        for paper in papers
+        for limitation in paper.get("indexing", {}).get("limitations", [])
+    ]
+    limitations.extend(limitation for repository in repositories for limitation in repository.get("limitations", []))
+    if selection["excluded_papers"] or selection["excluded_repositories"]:
+        limitations.append("Lower-ranked candidates were excluded by count or token budget; they were not silently treated as disproven.")
+    observed_input = sum(int(paper.get("indexing", {}).get("graphify_tokens", {}).get("input", 0)) for paper in papers)
+    observed_input += sum(int(repository.get("graphify_tokens", {}).get("input", 0)) for repository in repositories)
+    observed_output = sum(int(paper.get("indexing", {}).get("graphify_tokens", {}).get("output", 0)) for paper in papers)
+    observed_output += sum(int(repository.get("graphify_tokens", {}).get("output", 0)) for repository in repositories)
+    selection["budget"]["observed_graphify_input"] = observed_input
+    selection["budget"]["observed_graphify_output"] = observed_output
+    selection["budget"]["observed_exceeds_total"] = observed_input > args.token_budget
+    if observed_input > args.token_budget:
+        limitations.append(
+            f"Observed Graphify extraction input ({observed_input} tokens) exceeded the planning budget ({args.token_budget}); narrow the corpus or use quick/standard code-only indexing."
+        )
+    plan_payload = {
+        "question": question,
+        "requirements": candidates["requirements"],
+        "papers": papers,
+        "repositories": repositories,
+        "excluded_papers": selection["excluded_papers"],
+        "excluded_repositories": selection["excluded_repositories"],
+        "budget": selection["budget"],
+        "limitations": limitations,
+    }
+    plan = build_plan_markdown(plan_payload)
+    manifest_path = scope / "research-manifest.json"
+    plan_path = scope / "BUILD_PLAN.md"
+    payload = {
+        "format_version": "1.0",
+        "brand": BRAND,
+        "research_mode": True,
+        "question": question,
+        "mode": args.mode,
+        "artifact_dir": str(scope),
+        "candidates_path": str(candidate_path),
+        "budget": selection["budget"],
+        "papers": papers,
+        "repositories": repositories,
+        "excluded_papers": selection["excluded_papers"],
+        "excluded_repositories": selection["excluded_repositories"],
+        "relationships": {
+            "EXTRACTED": [item for item in relationships if item["evidence_status"] == "EXTRACTED"],
+            "INFERRED": [],
+            "AMBIGUOUS": [item for item in relationships if item["evidence_status"] == "AMBIGUOUS"],
+        },
+        "limitations": limitations,
+        "build_plan": str(plan_path),
+        "tool_versions": version_report["tools"],
+        "commands": command_log(runner.history[before:]),
+        "timestamp": utc_now(),
+    }
+    if not runner.dry_run:
+        scope.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        plan_path.write_text(plan, encoding="utf-8")
+    payload["_build_plan_markdown"] = plan
+    return payload
 
 
 def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
@@ -906,11 +1813,15 @@ def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     ):
         limitations.append("At least one index health check is degraded; inspect indexing.health before relying on query completeness.")
     if not research.get("query_terms"):
-        limitations.append("The question had no exact overlap with Graphify vocabulary; no graph traversal was fabricated.")
+        limitations.append("The question and constrained intent expansion had no overlap with Graphify vocabulary; no graph traversal was fabricated.")
+    limitations.extend(research.get("parse_errors", []))
     nexus_payload = research.get("gitnexus_payload", {})
     if nexus_payload.get("warning"):
         limitations.append(f"GitNexus warning: {nexus_payload['warning']}")
     paths = list(nexus_payload.get("processes", []))
+    if not research.get("consumer_index_shared"):
+        paths.extend(research.get("consumer_gitnexus_payload", {}).get("processes", []))
+    paths.extend(research.get("gitnexus_group_payload", {}).get("processes", []))
     for context in research.get("contexts", []):
         paths.extend(context.get("processes", []))
     return {
@@ -960,6 +1871,7 @@ def compare(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     if all(item.get("cache_path") for item in records):
         differences = compare_source_trees(Path(records[0]["cache_path"]), Path(records[1]["cache_path"]))
         limitations.append("File differences are direct source-hash evidence; assess behavioral meaning with isolated Graphify and GitNexus queries.")
+    evidence = comparison_evidence(differences, args.from_version, args.to_version, research)
     for record in records:
         record["tool_versions"] = _research_tool_versions(version_report["tools"])
     return {
@@ -970,7 +1882,7 @@ def compare(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
         "from": records[0],
         "to": records[1],
         "differences": differences,
-        "evidence": [],
+        "evidence": evidence,
         "indexes": indexes,
         "research": research,
         "limitations": limitations or ["Run source-level Graphify and GitNexus queries for each isolated version before classifying behavioral changes."],
@@ -1142,14 +2054,15 @@ def evidence_table(rows: Iterable[dict[str, Any]]) -> str:
     return "\n".join(rendered)
 
 
-def add_common(parser: argparse.ArgumentParser) -> None:
+def add_common(parser: argparse.ArgumentParser, *, include_cross_repository_options: bool = True) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print and record commands without executing tools.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown or human-readable text.")
     parser.add_argument("--output", help="Write output to this file.")
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-command timeout in seconds.")
     parser.add_argument("--mode", choices=MODES, default="standard")
-    parser.add_argument("--allow-global-graph", action="store_true", help="Allow a merged Graphify graph.")
-    parser.add_argument("--allow-gitnexus-group", action="store_true", help="Allow GitNexus group creation.")
+    if include_cross_repository_options:
+        parser.add_argument("--allow-global-graph", action="store_true", help="Allow a merged Graphify graph.")
+        parser.add_argument("--allow-gitnexus-group", action="store_true", help="Allow GitNexus group creation.")
 
 
 def add_dependency(parser: argparse.ArgumentParser, *, project_required: bool = True) -> None:
@@ -1176,13 +2089,28 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser = sub.add_parser("compare", help="Resolve two dependency versions for isolated comparison.")
     add_common(compare_parser); add_dependency(compare_parser, project_required=False)
     compare_parser.add_argument("--from", dest="from_version", required=True); compare_parser.add_argument("--to", dest="to_version", required=True); compare_parser.add_argument("--question", required=True)
+    research_parser = sub.add_parser("research", help="Rank paper/repository candidates, index selected evidence, and generate a build plan.")
+    add_common(research_parser, include_cross_repository_options=False)
+    research_parser.add_argument("--project", required=True)
+    research_parser.add_argument("--candidates", required=True, help="JSON manifest produced by current paper/repository discovery.")
+    research_parser.add_argument("--question", help="Override the research question in the candidates manifest.")
+    research_parser.add_argument("--max-papers", type=int, default=8)
+    research_parser.add_argument("--max-repositories", type=int, default=4)
+    research_parser.add_argument("--token-budget", type=int, default=30_000)
+    research_parser.add_argument("--force", action="store_true")
     report_parser = sub.add_parser("report", help="Render a saved SGRX JSON result as Markdown or normalized JSON.")
     add_common(report_parser); report_parser.add_argument("--input", required=True)
     return parser
 
 
 def write_output(payload: dict[str, Any], args: argparse.Namespace, *, report: bool = False) -> None:
-    content = json.dumps(payload, indent=2, ensure_ascii=False) + "\n" if args.json else markdown_report(payload)
+    normalized = {key: value for key, value in payload.items() if not key.startswith("_")}
+    if args.json:
+        content = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
+    elif payload.get("research_mode"):
+        content = str(payload.get("_build_plan_markdown") or "")
+    else:
+        content = markdown_report(normalized)
     if args.output:
         output = Path(args.output).expanduser()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1209,12 +2137,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = analyze(args, runner)
         elif args.command == "compare":
             payload = compare(args, runner)
+        elif args.command == "research":
+            payload = research_mode(args, runner)
         else:
             input_path = Path(args.input).expanduser()
             payload = json.loads(input_path.read_text(encoding="utf-8"))
         write_output(payload, args, report=args.command == "report")
         return 0
-    except (SGRXError, OSError, json.JSONDecodeError) as exc:
+    except (SGRXError, ResearchError, OSError, json.JSONDecodeError) as exc:
         print(f"SGRX error: {exc}", file=sys.stderr)
         return 2
 

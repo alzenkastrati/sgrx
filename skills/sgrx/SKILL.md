@@ -1,6 +1,6 @@
 ---
 name: sgrx
-description: "Trace exact dependency source and execution paths with opensrc, Graphify, and GitNexus. Use for dependency internals, package source research, cross-repository analysis, implementation tracing, architecture investigation, version comparison, blast-radius analysis, source graph research, and SGRX workflows that connect consumer call sites to version-accurate external implementations."
+description: "Research how to build systems from current AI papers and exact GitHub implementations, and trace dependency source and execution paths with OpenSrc, Graphify, and GitNexus. Use for AI paper discovery, solution research, architecture planning, token-efficient multi-repository comparison, dependency internals, implementation tracing, version comparison, blast-radius analysis, and evidence-backed build plans."
 ---
 
 # SGRX — Source Graph Research eXplorer
@@ -21,13 +21,13 @@ Use argument-list subprocess calls with `shell=False`, timeouts, and bounded out
 
 Read [tool-routing.md](references/tool-routing.md) before choosing commands. Use opensrc to resolve and fetch exact source. Use Graphify for architecture, communities, documents, and relationship paths. Use GitNexus for symbols, callers, execution flows, processes, context, and change impact.
 
-Keep the consumer and dependency in separate Graphify graphs by default. Index dependency source with an isolated GitNexus alias. Create cross-repository state only after explicit authorization.
+Keep the consumer and dependency in separate Graphify graphs and isolated GitNexus aliases by default when their paths differ. Share one explicitly labeled index for self-analysis. Create a cross-repository GitNexus group only after explicit authorization.
 
 ## Execute the workflow
 
 1. Run `python scripts/sgrx.py doctor` and report missing prerequisites with installation guidance. Require Node.js 18 or newer, Git, opensrc, Graphify, npx, and GitNexus. Never install them without permission.
 2. Resolve the dependency from a consumer lockfile when possible. Otherwise require an explicit version or Git ref. Run `opensrc path <package> --cwd <consumer-project>` and record registry, resolved version, ref, commit, lockfile, cache path, timestamp, tool versions, and executed commands.
-3. Reuse current healthy indexes. Report stale or degraded indexes. Create missing indexes only in the requested scope. Run Graphify with an explicit `.sgrx/<package-version>/` output directory. Copy fetched source into an isolated SGRX snapshot before GitNexus indexing, sandbox its HOME and registry, and verify that the opensrc cache remains byte-for-byte unchanged.
+3. Reuse current healthy indexes. Report stale or degraded indexes. Create missing indexes only in the requested scope. Run Graphify with identity-specific consumer and dependency output directories under `.sgrx/<package-version>/`. Copy each distinct role into an isolated SGRX snapshot before GitNexus indexing, sandbox its HOME, registry, and Git discovery boundary, and verify that the original consumer and opensrc source remain byte-for-byte unchanged.
 4. Inspect consumer imports, re-exports, wrappers, adapters, configuration, calls, validation, error handling, tests, and execution flows.
 5. Query the isolated Graphify and GitNexus indexes. Trace the public dependency export through facades and wrappers to implementation, validation, errors, fallbacks, tests, deprecations, and edge cases. Keep query relevance AMBIGUOUS until imports, calls, or contracts prove the project-boundary transition.
 6. Map the project boundary with consumer and dependency file/line evidence, GitNexus symbols or processes, Graphify relationships, evidence status, confidence, and uncertainty.
@@ -35,6 +35,10 @@ Keep the consumer and dependency in separate Graphify graphs by default. Index d
 8. Generate a report without filling evidence gaps. Mark unavailable tools, unresolved paths, and inconclusive outputs visibly.
 
 Use `python scripts/sgrx.py --help` for the deterministic command surface. Use `--dry-run` before executing unfamiliar scopes.
+
+## Run research mode
+
+Read [research-mode.md](references/research-mode.md) when the user asks how best to build a system from papers and existing implementations. Search current primary paper sources and official GitHub repositories with the available web tools, write a candidate manifest, then run `python scripts/sgrx.py research`. Let the deterministic command rank and limit candidates, resolve exact repository refs with OpenSrc, create isolated paper/repository graphs, checkpoint every successful candidate, and generate `BUILD_PLAN.md`. Prefer `quick` or `standard` code-only repository graphs for token efficiency; use `deep` only when repository prose is material. Re-query selected graph nodes before strengthening the generated recommendations.
 
 ## Classify every relationship
 

@@ -1,5 +1,12 @@
 # Report schema
 
+## Contents
+
+- Markdown report sections
+- Standard JSON report
+- Provenance and mapping rows
+- Research-mode JSON report
+
 ## Write Markdown sections
 
 Include these sections in order:
@@ -67,3 +74,36 @@ Record the requested package, registry or repository, resolved version, tag/ref,
 Record `consumer_location`, `package`, `public_api`, `dependency_location`, `gitnexus_symbol_or_process`, `graphify_relationship`, `evidence_status`, `confidence`, and `uncertainties`. Validate the status against `EXTRACTED`, `INFERRED`, and `AMBIGUOUS`.
 
 Never omit a section to conceal unavailable evidence. Use an empty collection and explain the reason in limitations.
+
+## Emit research-mode fields
+
+Research mode extends the standard evidence rules with this top-level shape:
+
+```json
+{
+  "format_version": "1.0",
+  "brand": "SGRX — Source Graph Research eXplorer",
+  "research_mode": true,
+  "question": "string",
+  "mode": "quick|standard|deep",
+  "artifact_dir": "path",
+  "candidates_path": "path",
+  "budget": {},
+  "papers": [],
+  "repositories": [],
+  "excluded_papers": [],
+  "excluded_repositories": [],
+  "relationships": {
+    "EXTRACTED": [],
+    "INFERRED": [],
+    "AMBIGUOUS": []
+  },
+  "limitations": [],
+  "build_plan": "path/to/BUILD_PLAN.md",
+  "tool_versions": {},
+  "commands": [],
+  "timestamp": "RFC 3339 string"
+}
+```
+
+Preserve the ranking score, estimated token cost, observed Graphify input/output tokens, source profile, indexed file count, checkpoint status, provenance, graph path, graph nodes, index health, and limitations for every selected candidate. Preserve excluded candidates so budget selection is auditable. Treat paper-to-repository linkage as `EXTRACTED` only when an official paper, author, or repository source directly establishes it.

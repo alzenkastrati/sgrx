@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "sgrx"
+IGNORED_SCAN_PARTS = {".git", ".gitnexus", ".sgrx", ".venv", "__pycache__", "build", "dist", "graphify-out", "node_modules", "venv"}
 
 
 class SkillStructureTests(unittest.TestCase):
@@ -17,13 +18,16 @@ class SkillStructureTests(unittest.TestCase):
             ROOT / "VERSION",
             ROOT / ".gitignore",
             ROOT / ".github" / "workflows" / "ci.yml",
+            ROOT / ".github" / "workflows" / "integration.yml",
             SKILL / "SKILL.md",
             SKILL / "agents" / "openai.yaml",
             SKILL / "scripts" / "sgrx.py",
+            SKILL / "scripts" / "sgrx_research.py",
             SKILL / "references" / "tool-routing.md",
             SKILL / "references" / "evidence-model.md",
             SKILL / "references" / "report-schema.md",
             SKILL / "references" / "examples.md",
+            SKILL / "references" / "research-mode.md",
             ROOT / "tests" / "fixtures" / "consumer" / ".gitignore",
         ]
         self.assertTrue(all(path.is_file() for path in required))
@@ -40,9 +44,9 @@ class SkillStructureTests(unittest.TestCase):
     def test_description_contains_triggers(self):
         text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         required = [
-            "dependency internals", "package source research", "cross-repository analysis",
-            "implementation tracing", "architecture investigation", "version comparison",
-            "blast-radius analysis", "opensrc", "Graphify", "GitNexus", "source graph research", "SGRX",
+            "AI paper discovery", "solution research", "architecture planning",
+            "dependency internals", "implementation tracing", "version comparison",
+            "blast-radius analysis", "OpenSrc", "Graphify", "GitNexus", "evidence-backed build plans",
         ]
         for phrase in required:
             self.assertIn(phrase, text)
@@ -51,8 +55,8 @@ class SkillStructureTests(unittest.TestCase):
         text = (SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
         expected = [
             '  display_name: "SGRX — Source Graph Research eXplorer"',
-            '  short_description: "Trace dependency source and execution graphs"',
-            '  default_prompt: "Use $sgrx to trace this dependency from the consumer call site into its exact implementation and assess the change impact."',
+            '  short_description: "Research papers, source graphs, and build plans"',
+            '  default_prompt: "Use $sgrx to research current papers and official repositories, inspect their source graphs, and produce an evidence-backed implementation plan."',
         ]
         for line in expected:
             self.assertIn(line, text)
@@ -60,7 +64,7 @@ class SkillStructureTests(unittest.TestCase):
 
     def test_skill_links_every_reference_directly(self):
         text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        for name in ("tool-routing.md", "evidence-model.md", "report-schema.md", "examples.md"):
+        for name in ("tool-routing.md", "evidence-model.md", "report-schema.md", "examples.md", "research-mode.md"):
             self.assertIn(f"references/{name}", text)
 
     def test_no_extraneous_skill_documents(self):
@@ -78,7 +82,7 @@ class SkillStructureTests(unittest.TestCase):
         ]
         suffixes = {".md", ".py", ".yml", ".yaml", ".json", ".ts", ".txt"}
         for path in ROOT.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in suffixes or any(part in {".git", "__pycache__"} for part in path.parts):
+            if not path.is_file() or path.suffix.lower() not in suffixes or any(part in IGNORED_SCAN_PARTS for part in path.parts):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             for marker in markers:
@@ -89,7 +93,9 @@ class SkillStructureTests(unittest.TestCase):
     def test_no_secret_material(self):
         assignment = re.compile(r"(?i)(api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}")
         for path in ROOT.rglob("*"):
-            if path.is_file() and path.suffix.lower() in {".md", ".py", ".yml", ".yaml", ".json"}:
+            if path.is_file() and path.suffix.lower() in {".md", ".py", ".yml", ".yaml", ".json"} and not any(
+                part in IGNORED_SCAN_PARTS for part in path.parts
+            ):
                 self.assertIsNone(assignment.search(path.read_text(encoding="utf-8", errors="replace")), path)
 
     def test_fixture_ignores_sgrx_artifacts(self):
@@ -101,6 +107,13 @@ class SkillStructureTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("SGRX", text)
         self.assertIn("$sgrx", (ROOT / "README.md").read_text(encoding="utf-8"))
+
+    def test_readme_has_real_installation_and_recovery_guidance(self):
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("https://github.com/alzenkastrati/sgrx/tree/main/skills/sgrx", text)
+        self.assertIn("Recovery and troubleshooting", text)
+        self.assertIn("core.longpaths", text)
+        self.assertIn("does not silently browse the web itself", text)
 
     def test_release_version_is_consistent(self):
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -114,6 +127,14 @@ class SkillStructureTests(unittest.TestCase):
             self.assertNotIn(command, text)
         self.assertIn('"ubuntu-latest"', text)
         self.assertIn('"windows-latest"', text)
+
+    def test_integration_workflow_pins_external_toolchain(self):
+        text = (ROOT / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch", text)
+        self.assertIn("opensrc@0.7.3", text)
+        self.assertIn("gitnexus@1.6.5", text)
+        self.assertIn("graphifyy==0.9.12", text)
+        self.assertIn('SGRX_RUN_INTEGRATION: "1"', text)
 
 
 if __name__ == "__main__":

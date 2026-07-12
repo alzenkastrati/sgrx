@@ -42,4 +42,12 @@ python skills/sgrx/scripts/sgrx.py compare --registry npm --package zod --from 3
 python skills/sgrx/scripts/sgrx.py analyze --dry-run --json --registry npm --package zod --project /workspace/consumer --question "Trace parse() into its internal implementation."
 ```
 
+## Research papers and implementation repositories
+
+After current web discovery produces `research-candidates.json`:
+
+```console
+python skills/sgrx/scripts/sgrx.py research --project /workspace/product --candidates research-candidates.json --question "How should we build a local multimodal agent?" --max-papers 8 --max-repositories 4 --token-budget 30000 --mode deep
+```
+
 Treat all outputs above as command examples only. Derive every conclusion from the current consumer, resolved source, and tool evidence.

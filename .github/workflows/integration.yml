@@ -1,0 +1,36 @@
+name: "Integration"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: "read"
+
+jobs:
+  toolchain-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "windows-latest"]
+    runs-on: "${{ matrix.os }}"
+    steps:
+      - name: "Check out repository"
+        uses: "actions/checkout@v7"
+      - name: "Set up Python"
+        uses: "actions/setup-python@v5"
+        with:
+          python-version: "3.12"
+      - name: "Set up Node.js"
+        uses: "actions/setup-node@v4"
+        with:
+          node-version: "20"
+      - name: "Install pinned integration tools"
+        run: "npm install --global opensrc@0.7.3 gitnexus@1.6.5 && python -m pip install graphifyy==0.9.12"
+      - name: "Verify toolchain"
+        run: "python skills/sgrx/scripts/sgrx.py doctor --json"
+      - name: "Run real isolated-tool integration tests"
+        env:
+          SGRX_RUN_INTEGRATION: "1"
+        run: "python -m unittest tests.test_smoke_opt_in -v"
