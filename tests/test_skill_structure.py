@@ -137,6 +137,8 @@ class SkillStructureTests(unittest.TestCase):
         self.assertIn("opensrc@0.7.3", text)
         self.assertIn("gitnexus@1.6.5", text)
         self.assertIn("graphifyy==0.9.12", text)
+        self.assertIn("--only-binary=:all:", text)
+        self.assertIn("timeout-minutes: 20", text)
         self.assertIn('node-version: "24"', text)
         self.assertIn('SGRX_RUN_INTEGRATION: "1"', text)
 

@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   toolchain-integration:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,8 +27,15 @@ jobs:
         uses: "actions/setup-node@v4"
         with:
           node-version: "24"
-      - name: "Install pinned integration tools"
-        run: "npm install --global opensrc@0.7.3 gitnexus@1.6.5 && python -m pip install graphifyy==0.9.12"
+      - name: "Install pinned Node.js integration tools"
+        timeout-minutes: 10
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+        run: "npm install --global opensrc@0.7.3 gitnexus@1.6.5"
+      - name: "Install pinned Graphify binary wheels"
+        timeout-minutes: 5
+        run: "python -m pip install --only-binary=:all: graphifyy==0.9.12"
       - name: "Verify toolchain"
         run: "python skills/sgrx/scripts/sgrx.py doctor --json"
       - name: "Run real isolated-tool integration tests"
