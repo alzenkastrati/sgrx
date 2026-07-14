@@ -6,7 +6,7 @@
 [![Integration](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml/badge.svg)](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-SGRX is a Codex skill that researches **how software should be built** and **how existing code really works**.
+SGRX is an open-source workflow and CLI for researching **how software should be built** and **how existing code really works**. It includes a ready-to-use Codex skill, but the underlying CLI and analysis workflow are not tied to Codex. They can be integrated into other AI agents, editor extensions, or internal developer tooling.
 
 Ask a normal question. SGRX finds relevant AI papers and exact GitHub implementations, studies their source code, and returns a practical plan with evidence.
 
@@ -23,6 +23,26 @@ papers and real GitHub projects, then give me a step-by-step implementation plan
 $sgrx Show me how the zod version in this project validates email addresses.
 Trace our call into the exact library source and explain what could break.
 ```
+
+### Example: understand a legacy codebase faster
+
+Give this prompt to any AI assistant that is connected to the SGRX CLI, regardless of the harness:
+
+```text
+Use SGRX to analyze this repository in standard mode. The goal is to help a new
+developer understand the codebase quickly.
+
+Create a short Markdown report that identifies:
+1. the most important modules and their responsibilities;
+2. the main execution flows from entry points to business logic;
+3. important external dependencies and how they are used;
+4. critical or hard-to-maintain areas; and
+5. the three most useful next steps for testing or modernization.
+
+Support each finding with file and line references. Do not change the code.
+```
+
+This is useful for reducing the time needed to understand large, long-lived systems before making changes.
 
 ## How it works
 
@@ -45,11 +65,11 @@ SGRX coordinates three tools:
 | **Graphify** | Draws the architecture and relationships. |
 | **GitNexus** | Traces functions, callers, flows, and change risks. |
 
-This helps Codex avoid guessing from documentation, inspecting the wrong version, or sending too much source code into the model.
+This helps developers and AI assistants avoid guessing from documentation, inspecting the wrong version, or sending too much source code into the model.
 
 ## Why it can use fewer tokens
 
-SGRX narrows the evidence **before** Codex reads it:
+SGRX narrows the evidence **before** a model reads it:
 
 - It ranks papers and repositories instead of analyzing every candidate.
 - `quick` and `standard` modes build code-only snapshots.
@@ -57,9 +77,11 @@ SGRX narrows the evidence **before** Codex reads it:
 - Saved indexes and checkpoints avoid repeating completed research.
 - A token budget limits how much material enters semantic analysis.
 
-In one SGRX self-research run, the selected corpus used **5,499 Graphify input tokens** after filtering. This is an observed workflow example, not a guaranteed saving or a measurement of total Codex/API usage. Actual results depend on the question, repositories, and research mode.
+In one SGRX self-research run, the selected corpus used **5,499 Graphify input tokens** after filtering. This is an observed workflow example, not a guaranteed saving or a measurement of total model/API usage. Actual results depend on the question, repositories, and research mode.
 
 ## Install
+
+### Codex
 
 Ask Codex:
 
@@ -71,6 +93,17 @@ https://github.com/alzenkastrati/sgrx/tree/main/skills/sgrx
 Then restart Codex and use `$sgrx`.
 
 Manual installation: copy `skills/sgrx` to `$CODEX_HOME/skills/sgrx`.
+
+### Other AI harnesses and tooling
+
+The Codex skill is only one interface. Other agents or tools can call the same harness-neutral CLI commands directly, for example:
+
+```console
+python skills/sgrx/scripts/sgrx.py doctor
+python skills/sgrx/scripts/sgrx.py --help
+```
+
+Connect the CLI to the agent or developer workflow you already use, then use the prompt above as the task contract.
 
 ## Requirements
 
