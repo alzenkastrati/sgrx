@@ -1,4 +1,5 @@
 .sgrx/
+.codex-remote-attachments/
 .gitnexus/
 __pycache__/
 *.py[cod]
