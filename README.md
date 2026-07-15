@@ -6,7 +6,9 @@
 [![Integration](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml/badge.svg)](https://github.com/alzenkastrati/sgrx/actions/workflows/integration.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-SGRX is an open-source workflow and CLI for researching **how software should be built** and **how existing code really works**. It includes a ready-to-use Codex skill, but the underlying CLI and analysis workflow are not tied to Codex. They can be integrated into other AI agents, editor extensions, or internal developer tooling.
+🌐 [Deutsch](README.de.md)
+
+SGRX ships as a ready-to-use Codex skill and a harness-neutral CLI workflow. It researches **how software should be built**, helps understand **how existing code really works**, traces dependencies, and creates evidence-backed implementation and modernization plans. The underlying CLI and analysis workflow can also be integrated into other AI agents, editor extensions, or internal developer tooling.
 
 Ask a normal question. SGRX finds relevant AI papers and exact GitHub implementations, studies their source code, and returns a practical plan with evidence.
 
