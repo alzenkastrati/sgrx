@@ -101,11 +101,16 @@ Manuelle Installation: Kopiere `skills/sgrx` nach `$CODEX_HOME/skills/sgrx`.
 
 ### Andere KI-Agenten und Entwicklerwerkzeuge
 
-Der Codex-Skill ist nur eine Schnittstelle. Andere Agenten oder Werkzeuge können dieselben CLI-Befehle direkt aufrufen:
+Der Codex-Skill ist nur eine Schnittstelle. Andere Agenten oder Werkzeuge können dieselben CLI-Befehle direkt aufrufen. Verwende unter Windows `py -3`, damit der `python`-Alias des Microsoft Store den Befehl nicht abfängt:
 
 ```console
-python skills/sgrx/scripts/sgrx.py doctor
-python skills/sgrx/scripts/sgrx.py --help
+# Windows
+py -3 skills/sgrx/scripts/sgrx.py doctor
+py -3 skills/sgrx/scripts/sgrx.py --help
+
+# macOS und Linux
+python3 skills/sgrx/scripts/sgrx.py doctor
+python3 skills/sgrx/scripts/sgrx.py --help
 ```
 
 Binde die CLI in den bereits verwendeten Agenten- oder Entwicklerworkflow ein und verwende den Prompt oben als klaren Arbeitsauftrag.
@@ -123,13 +128,19 @@ Installiere die drei Recherchewerkzeuge:
 
 ```console
 npm install --global opensrc@0.7.3 gitnexus@1.6.5
-python -m pip install graphifyy==0.9.12
+# Windows
+py -3 -m pip install graphifyy==0.9.12
+# macOS und Linux
+python3 -m pip install graphifyy==0.9.12
 ```
 
 Prüfe anschließend, ob alles bereit ist:
 
 ```console
-python skills/sgrx/scripts/sgrx.py doctor
+# Windows
+py -3 skills/sgrx/scripts/sgrx.py doctor
+# macOS und Linux
+python3 skills/sgrx/scripts/sgrx.py doctor
 ```
 
 ## Was erhalte ich?

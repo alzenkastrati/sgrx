@@ -111,6 +111,18 @@ class SkillStructureTests(unittest.TestCase):
             self.assertIn("SGRX", text)
         self.assertIn("$sgrx", (ROOT / "README.md").read_text(encoding="utf-8"))
 
+    def test_skill_selects_verified_python_launcher(self):
+        text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        for phrase in ("py -3", "python3", "WindowsApps", "<python> scripts/sgrx.py doctor"):
+            self.assertIn(phrase, text)
+        self.assertNotIn("`python scripts/sgrx.py", text)
+
+    def test_readmes_document_windows_python_launcher(self):
+        for path in (ROOT / "README.md", ROOT / "README.de.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("py -3 skills/sgrx/scripts/sgrx.py doctor", text)
+            self.assertIn("python3 skills/sgrx/scripts/sgrx.py doctor", text)
+
     def test_readme_has_real_installation_and_recovery_guidance(self):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("https://github.com/alzenkastrati/sgrx/tree/main/skills/sgrx", text)

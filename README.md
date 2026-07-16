@@ -98,11 +98,16 @@ Manual installation: copy `skills/sgrx` to `$CODEX_HOME/skills/sgrx`.
 
 ### Other AI harnesses and tooling
 
-The Codex skill is only one interface. Other agents or tools can call the same harness-neutral CLI commands directly, for example:
+The Codex skill is only one interface. Other agents or tools can call the same harness-neutral CLI commands directly. Use `py -3` on Windows so the Microsoft Store `python` alias cannot intercept the command:
 
 ```console
-python skills/sgrx/scripts/sgrx.py doctor
-python skills/sgrx/scripts/sgrx.py --help
+# Windows
+py -3 skills/sgrx/scripts/sgrx.py doctor
+py -3 skills/sgrx/scripts/sgrx.py --help
+
+# macOS and Linux
+python3 skills/sgrx/scripts/sgrx.py doctor
+python3 skills/sgrx/scripts/sgrx.py --help
 ```
 
 Connect the CLI to the agent or developer workflow you already use, then use the prompt above as the task contract.
@@ -120,13 +125,19 @@ Install the three research tools:
 
 ```console
 npm install --global opensrc@0.7.3 gitnexus@1.6.5
-python -m pip install graphifyy==0.9.12
+# Windows
+py -3 -m pip install graphifyy==0.9.12
+# macOS and Linux
+python3 -m pip install graphifyy==0.9.12
 ```
 
 Check that everything is ready:
 
 ```console
-python skills/sgrx/scripts/sgrx.py doctor
+# Windows
+py -3 skills/sgrx/scripts/sgrx.py doctor
+# macOS and Linux
+python3 skills/sgrx/scripts/sgrx.py doctor
 ```
 
 ## What do I receive?
