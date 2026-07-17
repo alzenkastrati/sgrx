@@ -8,7 +8,7 @@
 
 🌐 [Deutsch](README.de.md)
 
-SGRX ships as a portable Agent Skill and a harness-neutral CLI workflow. It researches **how software should be built**, helps understand **how existing code really works**, traces dependencies, and creates evidence-backed implementation and modernization plans. The same skill works across compatible AI agents, editor extensions, and internal developer tooling.
+SGRX ships as a portable Agent Skill and a harness-neutral CLI workflow. It researches **how software should be built**, helps understand **how existing code really works**, traces dependencies, compares practices from benchmark repositories, and creates evidence-backed implementation and modernization plans. The same skill works across compatible AI agents, editor extensions, and internal developer tooling.
 
 Ask a normal question. SGRX finds relevant AI papers and exact GitHub implementations, studies their source code, and returns a practical plan with evidence.
 
@@ -45,6 +45,21 @@ Support each finding with file and line references. Do not change the code.
 ```
 
 This is useful for reducing the time needed to understand large, long-lived systems before making changes.
+
+### Choose the right workflow
+
+| Goal | Command |
+|---|---|
+| Check whether the local tools are available | `doctor` |
+| Fetch an exact dependency revision | `resolve` |
+| Build isolated source indexes | `index` |
+| Trace application usage into dependency source | `analyze` |
+| Transfer practices from a benchmark repository | `audit` |
+| Compare two dependency versions | `compare` |
+| Rank papers and repositories and create a build plan | `research` |
+| Re-render a saved result | `report` |
+
+Use `--dry-run` to inspect the commands and output scope without running the research tools. Use `--json` when another tool should consume the result.
 
 ## How it works
 
@@ -99,6 +114,12 @@ py -3 skills/sgrx/scripts/install_skill.py
 python3 skills/sgrx/scripts/install_skill.py
 ```
 
+Preview the destinations without copying anything:
+
+```console
+py -3 skills/sgrx/scripts/install_skill.py --dry-run
+```
+
 | Installation path | Agent clients |
 |---|---|
 | `~/.agents/skills/sgrx` | Cursor, GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Amp |
@@ -124,6 +145,12 @@ python3 skills/sgrx/scripts/sgrx.py --help
 
 Connect the CLI to the agent or developer workflow you already use, then use the prompt above as the task contract.
 
+For example, trace how this project uses an installed npm dependency:
+
+```console
+py -3 skills/sgrx/scripts/sgrx.py analyze --registry npm --package zod --project . --question "How does this project call zod, and what implementation path handles those calls?"
+```
+
 ### Audit practices from another repository
 
 Use `audit` when the other repository is a benchmark or workflow catalog rather than an application dependency:
@@ -135,6 +162,10 @@ py -3 skills/sgrx/scripts/sgrx.py audit --registry github --benchmark owner/work
 Audit mode keeps benchmark and consumer indexes separate, excludes images and media by default, and stops before Graphify when its file or token budget would be exceeded. It queries lifecycle, context, distribution, validation, and reliability separately, then writes evidence mappings, a verified report, reusable checkpoints, and a compact `RUN_MANIFEST.md` handoff.
 
 Narrow a large benchmark without raising the budget by repeating `--include-path` or `--exclude-path` with repository-relative files or directories, for example `--include-path reports --include-path development-workflows --exclude-path reports/archive`.
+
+Audit defaults are intentionally conservative: the `code-docs` profile selects code, documents, and papers; images and media remain excluded; at most 300 files and an estimated 300,000 tokens may enter Graphify. The preflight reports `NARROW_REQUIRED` and stops before extraction when a limit is exceeded. Choose `--corpus-profile code` for source only or `--corpus-profile full` when visual and media evidence is actually required.
+
+Each completed audit writes an isolated, resumable evidence package below `.sgrx`: resolution, corpus plan, index manifest, facet queries, index context, evidence mappings, verification results, `REPORT.md`, `RUN_MANIFEST.md`, and `events.jsonl`. Repeating the same request reuses matching indexes and query checkpoints.
 
 ## Requirements
 
@@ -171,6 +202,7 @@ python3 skills/sgrx/scripts/sgrx.py doctor
 - Graph-backed links between architecture, files, and functions.
 - A detailed implementation plan broken into small work packages.
 - Clear labels for facts, deductions, and unanswered questions.
+- A visible verification status and a compact handoff manifest for continuing the run.
 
 SGRX labels evidence as:
 

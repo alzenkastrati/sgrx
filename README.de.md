@@ -8,7 +8,7 @@
 
 🌐 [English](README.md)
 
-SGRX ist ein portabler Agent Skill und ein CLI-Workflow, der nicht an eine bestimmte Agenten-Umgebung gebunden ist. Es untersucht, **wie Software am besten gebaut werden sollte**, hilft beim Verständnis **bestehender Codebasen**, verfolgt Abhängigkeiten und erstellt belegte Umsetzungs- und Modernisierungspläne. Derselbe Skill funktioniert in kompatiblen KI-Agenten, Editor-Erweiterungen und internen Entwicklerwerkzeugen.
+SGRX ist ein portabler Agent Skill und ein CLI-Workflow, der nicht an eine bestimmte Agenten-Umgebung gebunden ist. Es untersucht, **wie Software am besten gebaut werden sollte**, hilft beim Verständnis **bestehender Codebasen**, verfolgt Abhängigkeiten, vergleicht Praktiken aus Benchmark-Repositories und erstellt belegte Umsetzungs- und Modernisierungspläne. Derselbe Skill funktioniert in kompatiblen KI-Agenten, Editor-Erweiterungen und internen Entwicklerwerkzeugen.
 
 Stelle eine normale Frage. SGRX findet relevante KI-Paper und konkrete GitHub-Implementierungen, untersucht deren Quellcode und liefert einen praxisnahen Plan mit Belegen.
 
@@ -48,6 +48,21 @@ Code vor.
 ```
 
 Damit lässt sich die Zeit zum Verständnis großer, über Jahre gewachsener Systeme deutlich verkürzen, bevor Änderungen vorgenommen werden.
+
+### Den richtigen Workflow wählen
+
+| Ziel | Befehl |
+|---|---|
+| Prüfen, ob die lokalen Werkzeuge verfügbar sind | `doctor` |
+| Eine exakte Abhängigkeitsrevision abrufen | `resolve` |
+| Isolierte Quellcode-Indizes erstellen | `index` |
+| Aufrufe der Anwendung bis in den Abhängigkeitsquellcode verfolgen | `analyze` |
+| Praktiken aus einem Benchmark-Repository übertragen | `audit` |
+| Zwei Abhängigkeitsversionen vergleichen | `compare` |
+| Paper und Repositories bewerten und einen Bauplan erstellen | `research` |
+| Ein gespeichertes Ergebnis erneut ausgeben | `report` |
+
+Mit `--dry-run` kannst du Befehle und Ausgabebereich prüfen, ohne die Recherchewerkzeuge auszuführen. Verwende `--json`, wenn ein anderes Werkzeug das Ergebnis weiterverarbeiten soll.
 
 ## So funktioniert es
 
@@ -102,6 +117,12 @@ py -3 skills/sgrx/scripts/install_skill.py
 python3 skills/sgrx/scripts/install_skill.py
 ```
 
+Zeige die Zielpfade an, ohne Dateien zu kopieren:
+
+```console
+py -3 skills/sgrx/scripts/install_skill.py --dry-run
+```
+
 | Installationspfad | Agent-Clients |
 |---|---|
 | `~/.agents/skills/sgrx` | Cursor, GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Amp |
@@ -127,6 +148,12 @@ python3 skills/sgrx/scripts/sgrx.py --help
 
 Binde die CLI in den bereits verwendeten Agenten- oder Entwicklerworkflow ein und verwende den Prompt oben als klaren Arbeitsauftrag.
 
+So kannst du beispielsweise nachvollziehen, wie dieses Projekt eine installierte npm-Abhängigkeit verwendet:
+
+```console
+py -3 skills/sgrx/scripts/sgrx.py analyze --registry npm --package zod --project . --question "Wie ruft dieses Projekt zod auf und welcher Implementierungspfad verarbeitet diese Aufrufe?"
+```
+
 ### Praktiken aus einem anderen Repository prüfen
 
 Verwende `audit`, wenn das andere Repository ein Benchmark oder Workflow-Katalog und keine Anwendungsabhängigkeit ist:
@@ -138,6 +165,10 @@ py -3 skills/sgrx/scripts/sgrx.py audit --registry github --benchmark owner/work
 Der Audit-Modus hält Benchmark- und Consumer-Indizes getrennt, schließt Bilder und Medien standardmäßig aus und stoppt vor Graphify, wenn das Datei- oder Tokenbudget überschritten würde. Lifecycle, Kontext, Distribution, Validierung und Zuverlässigkeit werden getrennt abgefragt. Danach schreibt SGRX Belegzuordnungen, einen verifizierten Bericht, wiederverwendbare Checkpoints und ein kompaktes `RUN_MANIFEST.md` für die Übergabe.
 
 Einen großen Benchmark kannst du ohne höheres Budget gezielt verkleinern. Wiederhole dafür `--include-path` oder `--exclude-path` mit Repository-relativen Dateien oder Verzeichnissen, zum Beispiel `--include-path reports --include-path development-workflows --exclude-path reports/archive`.
+
+Die Audit-Voreinstellungen sind bewusst konservativ: Das Profil `code-docs` wählt Code, Dokumente und Paper aus; Bilder und Medien bleiben ausgeschlossen; höchstens 300 Dateien und geschätzte 300.000 Tokens dürfen in Graphify gelangen. Wird ein Grenzwert überschritten, meldet der Preflight `NARROW_REQUIRED` und stoppt vor der Extraktion. Wähle `--corpus-profile code` für reinen Quellcode oder `--corpus-profile full`, wenn Bild- und Medienbelege wirklich erforderlich sind.
+
+Jeder abgeschlossene Audit schreibt unter `.sgrx` ein isoliertes, fortsetzbares Belegpaket: Auflösung, Korpusplan, Indexmanifest, Facettenabfragen, Indexkontext, Belegzuordnungen, Verifikationsergebnisse, `REPORT.md`, `RUN_MANIFEST.md` und `events.jsonl`. Bei derselben Anfrage verwendet SGRX passende Indizes und Abfrage-Checkpoints erneut.
 
 ## Voraussetzungen
 
@@ -174,6 +205,7 @@ python3 skills/sgrx/scripts/sgrx.py doctor
 - Graphgestützte Verbindungen zwischen Architektur, Dateien und Funktionen.
 - Einen detaillierten Umsetzungsplan in kleinen Arbeitspaketen.
 - Klare Kennzeichnungen für Fakten, Schlussfolgerungen und offene Fragen.
+- Einen sichtbaren Verifikationsstatus und ein kompaktes Übergabemanifest zum Fortsetzen des Laufs.
 
 SGRX kennzeichnet Belege so:
 
