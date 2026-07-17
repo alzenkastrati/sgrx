@@ -8,7 +8,7 @@
 
 🌐 [Deutsch](README.de.md)
 
-SGRX ships as a ready-to-use Codex skill and a harness-neutral CLI workflow. It researches **how software should be built**, helps understand **how existing code really works**, traces dependencies, and creates evidence-backed implementation and modernization plans. The underlying CLI and analysis workflow can also be integrated into other AI agents, editor extensions, or internal developer tooling.
+SGRX ships as a portable Agent Skill and a harness-neutral CLI workflow. It researches **how software should be built**, helps understand **how existing code really works**, traces dependencies, and creates evidence-backed implementation and modernization plans. The same skill works across compatible AI agents, editor extensions, and internal developer tooling.
 
 Ask a normal question. SGRX finds relevant AI papers and exact GitHub implementations, studies their source code, and returns a practical plan with evidence.
 
@@ -83,22 +83,34 @@ In one SGRX self-research run, the selected corpus used **5,499 Graphify input t
 
 ## Install
 
-### Codex
+SGRX follows the open Agent Skills format: every compatible client loads the same `skills/sgrx/SKILL.md` and bundled resources. The `agents/openai.yaml` file only adds Codex UI metadata; it is not an allow-list and other clients safely ignore it.
 
-Ask Codex:
+Skill source: https://github.com/alzenkastrati/sgrx/tree/main/skills/sgrx
 
-```text
-Install the skill from:
-https://github.com/alzenkastrati/sgrx/tree/main/skills/sgrx
+### Install for all supported agents
+
+From a cloned checkout, run the portable installer without `--target`. It installs every target:
+
+```console
+# Windows
+py -3 skills/sgrx/scripts/install_skill.py
+
+# macOS and Linux
+python3 skills/sgrx/scripts/install_skill.py
 ```
 
-Then restart Codex and use `$sgrx`.
+| Installation path | Agent clients |
+|---|---|
+| `~/.agents/skills/sgrx` | Cursor, GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Amp |
+| `~/.codex/skills/sgrx` | Codex |
+| `~/.claude/skills/sgrx` | Claude Code |
+| `~/.cline/skills/sgrx` | Cline |
 
-Manual installation: copy `skills/sgrx` to `$CODEX_HOME/skills/sgrx`.
+Install only selected targets by repeating `--target` with `shared`, `codex`, `claude`, or `cline`. Existing installations are updated in place and unrelated skills are left untouched.
 
-### Other AI harnesses and tooling
+### Direct CLI use
 
-The Codex skill is only one interface. Other agents or tools can call the same harness-neutral CLI commands directly. Use `py -3` on Windows so the Microsoft Store `python` alias cannot intercept the command:
+Agents and developer tools can also call the harness-neutral CLI directly. Use `py -3` on Windows so the Microsoft Store `python` alias cannot intercept the command:
 
 ```console
 # Windows
@@ -111,6 +123,18 @@ python3 skills/sgrx/scripts/sgrx.py --help
 ```
 
 Connect the CLI to the agent or developer workflow you already use, then use the prompt above as the task contract.
+
+### Audit practices from another repository
+
+Use `audit` when the other repository is a benchmark or workflow catalog rather than an application dependency:
+
+```console
+py -3 skills/sgrx/scripts/sgrx.py audit --registry github --benchmark owner/workflow-catalog --ref 0123456789abcdef0123456789abcdef01234567 --project . --question "Which workflow and validation practices should this project adopt?"
+```
+
+Audit mode keeps benchmark and consumer indexes separate, excludes images and media by default, and stops before Graphify when its file or token budget would be exceeded. It queries lifecycle, context, distribution, validation, and reliability separately, then writes evidence mappings, a verified report, reusable checkpoints, and a compact `RUN_MANIFEST.md` handoff.
+
+Narrow a large benchmark without raising the budget by repeating `--include-path` or `--exclude-path` with repository-relative files or directories, for example `--include-path reports --include-path development-workflows --exclude-path reports/archive`.
 
 ## Requirements
 
@@ -163,9 +187,11 @@ SGRX analyzes by default. It changes your application only when you explicitly a
 ## Recovery and troubleshooting
 
 - Run the same research request again after an interruption; completed checkpoints are reused.
+- Audit and analyze runs write durable resolution, corpus, index, query, evidence, verification, report, and handoff artifacts below their isolated `.sgrx` scope.
 - On Windows, incomplete long-path checkouts are retried in an isolated short cache with `core.longpaths`. Global Git settings are not changed.
 - Pure paper or document graphs need a supported Graphify semantic backend. Without one, SGRX reports the paper graph as `PARTIAL` instead of inventing relationships.
-- GitNexus may report degraded keyword search when its local FTS extension is unavailable. SGRX keeps that limitation visible.
+- If GitNexus reports missing FTS indexes, SGRX performs one forced rebuild inside the isolated snapshot. The run remains visibly degraded when search is still unavailable.
+- Graphify zero-node files, extraction issues, and cross-chunk ID collisions are structured health failures and can no longer pass the verification gate as healthy.
 - The CLI does not silently browse the web itself. Codex discovers current papers and repositories; the local CLI ranks and analyzes the recorded candidates.
 
 ## More detail

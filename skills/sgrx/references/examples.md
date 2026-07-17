@@ -38,6 +38,14 @@ The commands below use `<python>` for the verified launcher selected in `SKILL.m
 <python> skills/sgrx/scripts/sgrx.py compare --registry npm --package zod --from 3.22.0 --to 4.4.3 --project /workspace/consumer --question "What changed in email validation?"
 ```
 
+## Audit practices from a benchmark repository
+
+```console
+<python> skills/sgrx/scripts/sgrx.py audit --registry github --benchmark owner/workflow-catalog --ref 0123456789abcdef0123456789abcdef01234567 --project /workspace/consumer --question "Which workflow and validation practices should this project adopt?" --corpus-profile code-docs --include-path reports --include-path workflows --token-budget 300000 --max-files 300
+```
+
+Audit mode excludes images and media by default, stops before Graphify when the corpus exceeds its hard limits, and produces durable query, evidence, verification, report, and handoff artifacts.
+
 ## Preview commands
 
 ```console

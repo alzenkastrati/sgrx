@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "sgrx"
-IGNORED_SCAN_PARTS = {".git", ".gitnexus", ".sgrx", ".venv", "__pycache__", "build", "dist", "graphify-out", "node_modules", "venv"}
+IGNORED_SCAN_PARTS = {".codex-tmp", ".git", ".gitnexus", ".sgrx", ".venv", "__pycache__", "build", "dist", "graphify-out", "node_modules", "venv"}
 
 
 class SkillStructureTests(unittest.TestCase):
@@ -24,6 +24,8 @@ class SkillStructureTests(unittest.TestCase):
             ROOT / ".github" / "workflows" / "integration.yml",
             SKILL / "SKILL.md",
             SKILL / "agents" / "openai.yaml",
+            SKILL / "scripts" / "install_skill.py",
+            SKILL / "scripts" / "sgrx_audit.py",
             SKILL / "scripts" / "sgrx.py",
             SKILL / "scripts" / "sgrx_research.py",
             SKILL / "references" / "tool-routing.md",
@@ -122,6 +124,28 @@ class SkillStructureTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("py -3 skills/sgrx/scripts/sgrx.py doctor", text)
             self.assertIn("python3 skills/sgrx/scripts/sgrx.py doctor", text)
+
+    def test_readmes_document_portable_agent_installation(self):
+        clients = (
+            "Codex", "Claude Code", "Cline", "Cursor", "GitHub Copilot",
+            "Gemini CLI", "OpenCode", "Windsurf", "Amp",
+        )
+        for path in (ROOT / "README.md", ROOT / "README.de.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("skills/sgrx/scripts/install_skill.py", text)
+            self.assertIn("agents/openai.yaml", text)
+            for client in clients:
+                self.assertIn(client, text)
+
+    def test_readmes_document_practice_audits_and_corpus_narrowing(self):
+        for path in (ROOT / "README.md", ROOT / "README.de.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("sgrx.py audit", text)
+            self.assertIn("--include-path", text)
+            self.assertIn("RUN_MANIFEST.md", text)
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## Run practice audit mode", skill)
+        self.assertIn("--exclude-path", skill)
 
     def test_readme_has_real_installation_and_recovery_guidance(self):
         text = (ROOT / "README.md").read_text(encoding="utf-8")

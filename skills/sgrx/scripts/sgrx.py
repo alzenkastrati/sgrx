@@ -33,6 +33,16 @@ from sgrx_research import (  # noqa: E402
     research_slug,
     select_with_budget,
 )
+from sgrx_audit import (  # noqa: E402
+    AUDIT_RECOMMENDATIONS,
+    CORPUS_PROFILES,
+    audit_checkpoint_signature,
+    audit_facets,
+    corpus_preflight,
+    handoff_markdown,
+    prepare_corpus_snapshot,
+    verify_report,
+)
 
 
 BRAND = "SGRX — Source Graph Research eXplorer"
@@ -391,6 +401,34 @@ def gitnexus_status_ok(result: CommandResult) -> bool:
     return result.ok and gitnexus_status_state(result) in {"HEALTHY", "ISOLATED"}
 
 
+def gitnexus_fts_missing(result: CommandResult) -> bool:
+    return "fts indexes missing" in f"{result.stdout}\n{result.stderr}".casefold()
+
+
+def graphify_health_issues(result: CommandResult) -> dict[str, Any]:
+    """Parse Graphify's structured-enough warnings into an explicit health record."""
+
+    text = f"{result.stdout}\n{result.stderr}"
+    zero_match = re.search(r"warning:\s*(\d+) source file\(s\) produced zero nodes", text, re.I)
+    extraction_match = re.search(r"Extraction warning \((\d+) issues?\)", text, re.I)
+    collision_count = len(re.findall(r"cross-chunk ID collision", text, re.I))
+    warnings = [
+        line.strip()
+        for line in text.splitlines()
+        if "warning" in line.casefold() or "collides with node" in line.casefold()
+    ]
+    zero_node_sources = int(zero_match.group(1)) if zero_match else 0
+    extraction_issues = int(extraction_match.group(1)) if extraction_match else 0
+    return {
+        "zero_node_sources": zero_node_sources,
+        "cross_chunk_id_collisions": collision_count,
+        "extraction_issues": extraction_issues,
+        "data_loss_risk": collision_count > 0,
+        "degraded": bool(zero_node_sources or collision_count or extraction_issues),
+        "warnings": warnings[:20],
+    }
+
+
 def _snapshot_ignore(directory: str, names: list[str]) -> set[str]:
     blocked = {".git", ".gitnexus", ".sgrx", "graphify-out", "node_modules", "target", "__pycache__"}
     ignored = {name for name in names if name in blocked or is_sensitive_name(name)}
@@ -672,7 +710,7 @@ def resolve_dependency(args: argparse.Namespace, runner: CommandRunner) -> dict[
             "succeeded": recovered_source is not None,
         }
     version = package_version(package, args.registry, ref) or lockfile_version(project, package, args.registry)
-    commit = None
+    commit = ref.lower() if args.registry == "github" and ref and re.fullmatch(r"[0-9a-fA-F]{40}", ref) else None
     if source_path and (source_path / ".git").exists():
         commit_result = runner.run(["git", "-C", str(source_path), "rev-parse", "HEAD"])
         if commit_result.ok and re.fullmatch(r"[0-9a-fA-F]{40}", commit_result.stdout.strip()):
@@ -733,22 +771,104 @@ def _run_isolated_index(
     project: Path,
     mode: str,
     allow_global_graph: bool,
+    corpus_profile: str,
+    token_budget: int,
+    max_files: int,
+    max_images: int,
+    include_paths: Sequence[str],
+    exclude_paths: Sequence[str],
     runner: CommandRunner,
 ) -> dict[str, Any]:
     role_scope = scope if role == "dependency" else scope / role
     graph_scope = role_scope / "graphify" / identity[:16]
     snapshot = source if runner.dry_run else prepare_source_snapshot(source, role_scope, identity)
     environment = gitnexus_env(scope, snapshot, create=not runner.dry_run)
+    if runner.dry_run and not source.is_dir():
+        preflight = {
+            "status": "WITHIN_BUDGET",
+            "profile": corpus_profile,
+            "root": str(source.resolve()),
+            "counts": {},
+            "selected_counts": {},
+            "total_files": 0,
+            "selected_files": 0,
+            "excluded_files": 0,
+            "selected_bytes": 0,
+            "estimated_tokens": 0,
+            "limits": {"token_budget": token_budget, "max_files": max_files, "max_images": max_images},
+            "filters": {"include_paths": list(include_paths), "exclude_paths": list(exclude_paths)},
+            "violations": [],
+            "planned": True,
+        }
+    else:
+        try:
+            preflight = corpus_preflight(
+                source,
+                profile=corpus_profile,
+                token_budget=token_budget,
+                max_files=max_files,
+                max_images=max_images,
+                include_paths=include_paths,
+                exclude_paths=exclude_paths,
+            )
+        except ValueError as exc:
+            raise SGRXError(str(exc)) from exc
+    graph_source = source
+    temporary_graph_root: Path | None = None
+    if corpus_profile != "full":
+        if runner.dry_run:
+            graph_source = role_scope / "graphify-source" / identity[:16]
+        elif preflight["status"] == "WITHIN_BUDGET":
+            temporary_graph_root = Path(tempfile.mkdtemp(prefix=f"sgrx-graphify-{role}-"))
+            graph_source = temporary_graph_root / "source"
+            prepare_corpus_snapshot(
+                source,
+                graph_source,
+                corpus_profile,
+                include_paths=include_paths,
+                exclude_paths=exclude_paths,
+            )
+    graph_path = graph_scope / "graphify-out" / "graph.json"
+    if preflight["status"] != "WITHIN_BUDGET":
+        source_unchanged = True if runner.dry_run else source_tree_identity(source) == identity
+        return {
+            "role": role,
+            "status": "PARTIAL",
+            "source_path": str(source),
+            "source_identity": identity,
+            "graph_path": str(graph_path),
+            "graph_source": str(graph_source),
+            "gitnexus_source": str(snapshot),
+            "gitnexus_alias": alias,
+            "gitnexus_home": environment["HOME"],
+            "preflight": preflight,
+            "graphify_issues": {},
+            "gitnexus_recovery": {"attempted": False, "succeeded": False},
+            "health": {
+                "preflight_ok": False,
+                "graph_exists": False,
+                "graph_diagnostics_ok": False,
+                "gitnexus_index_exists": False,
+                "gitnexus_status_ok": False,
+                "gitnexus_status_state": "NOT_RUN",
+                "gitnexus_search_ok": False,
+                "source_unchanged": source_unchanged,
+            },
+        }
     graph = runner.run(
-        graphify_command(source, graph_scope, mode, allow_global=allow_global_graph, alias=alias),
+        graphify_command(graph_source, graph_scope, mode, allow_global=allow_global_graph, alias=alias),
         cwd=scope if not runner.dry_run else project,
     )
+    observed_tokens = graphify_token_usage([graph])
+    preflight["observed_graphify_tokens"] = observed_tokens
+    preflight["observed_exceeds_budget"] = token_budget > 0 and observed_tokens["input"] > token_budget
+    if temporary_graph_root is not None:
+        shutil.rmtree(temporary_graph_root, ignore_errors=True)
     nexus = runner.run(
         gitnexus_command(snapshot, alias),
         cwd=snapshot if not runner.dry_run else project,
         env=environment,
     )
-    graph_path = graph_scope / "graphify-out" / "graph.json"
     graph_health = runner.run(
         ["graphify", "diagnose", "multigraph", "--graph", str(graph_path), "--json"],
         cwd=scope if not runner.dry_run else project,
@@ -763,17 +883,44 @@ def _run_isolated_index(
         cwd=snapshot if not runner.dry_run else project,
         env=environment,
     )
+    recovery = {"attempted": False, "succeeded": False}
+    if not runner.dry_run and gitnexus_fts_missing(nexus_search):
+        recovery["attempted"] = True
+        repair = runner.run(
+            [*gitnexus_command(snapshot, alias), "--force"],
+            cwd=snapshot,
+            env=environment,
+        )
+        if repair.ok:
+            nexus_status = runner.run(
+                ["npx", "--no-install", "gitnexus", "status"],
+                cwd=snapshot,
+                env=environment,
+            )
+            nexus_search = runner.run(
+                ["npx", "--no-install", "gitnexus", "query", "main", "--repo", alias, "--limit", "1"],
+                cwd=snapshot,
+                env=environment,
+            )
+            recovery["succeeded"] = nexus_search.ok and not gitnexus_fts_missing(nexus_search)
     source_unchanged = True if runner.dry_run else source_tree_identity(source) == identity
     nexus_index_exists = runner.dry_run or (snapshot / ".gitnexus").is_dir()
     graph_exists = runner.dry_run or graph_path.is_file()
     search_warning = "warning" in f"{nexus_search.stdout}\n{nexus_search.stderr}".casefold()
+    graph_issues = graphify_health_issues(graph)
+    if preflight["observed_exceeds_budget"]:
+        graph_issues["degraded"] = True
+        graph_issues["warnings"].append(
+            f"Observed Graphify input {observed_tokens['input']} exceeded budget {token_budget}."
+        )
+    graph_diagnostics_ok = graph_health.ok and not graph_issues["degraded"]
     status_state = "DRY_RUN" if runner.dry_run else gitnexus_status_state(nexus_status)
     status_ok = True if runner.dry_run else gitnexus_status_ok(nexus_status)
     if runner.dry_run:
         status = "DRY_RUN"
     elif not (graph.ok and nexus.ok and graph_exists and nexus_index_exists and source_unchanged):
         status = "PARTIAL"
-    elif graph_health.ok and status_ok and nexus_search.ok and not search_warning:
+    elif graph_diagnostics_ok and status_ok and nexus_search.ok and not search_warning:
         status = "HEALTHY"
     else:
         status = "DEGRADED"
@@ -783,12 +930,17 @@ def _run_isolated_index(
         "source_path": str(source),
         "source_identity": identity,
         "graph_path": str(graph_path),
+        "graph_source": str(graph_source),
         "gitnexus_source": str(snapshot),
         "gitnexus_alias": alias,
         "gitnexus_home": environment["HOME"],
+        "preflight": preflight,
+        "graphify_issues": graph_issues,
+        "gitnexus_recovery": recovery,
         "health": {
+            "preflight_ok": True,
             "graph_exists": graph_exists,
-            "graph_diagnostics_ok": graph_health.ok,
+            "graph_diagnostics_ok": graph_diagnostics_ok,
             "gitnexus_index_exists": nexus_index_exists,
             "gitnexus_status_ok": status_ok,
             "gitnexus_status_state": status_state,
@@ -802,6 +954,16 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
     project = Path(args.project).expanduser().resolve()
     package = validate_package(args.package, args.registry)
     version = getattr(args, "version", None) or getattr(args, "ref", None) or package_version(package, args.registry, None)
+    corpus_profile = getattr(args, "corpus_profile", "full")
+    token_budget = int(getattr(args, "token_budget", 0) or 0)
+    max_files = int(getattr(args, "max_files", 0) or 0)
+    max_images = int(getattr(args, "max_images", -1))
+    include_paths = tuple(getattr(args, "include_path", None) or ())
+    exclude_paths = tuple(getattr(args, "exclude_path", None) or ())
+    if corpus_profile not in CORPUS_PROFILES:
+        raise SGRXError(f"Unsupported corpus profile: {corpus_profile}")
+    if token_budget < 0 or max_files < 0 or max_images < -1:
+        raise SGRXError("Corpus limits must be non-negative; max-images may be -1 for unlimited.")
     scope = artifact_dir(project, package, version)
     source = source_path or (Path(args.source_path).expanduser().resolve() if getattr(args, "source_path", None) else None)
     if source is None or (not runner.dry_run and not source.is_dir()):
@@ -818,7 +980,10 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
     dependency_alias = f"{alias_base}-{dependency_identity[:8]}"
     consumer_alias = dependency_alias if shared_consumer_index else f"consumer-{safe_slug(project.name, None)}-{consumer_identity[:8]}"
     fingerprint = hashlib.sha256(
-        f"{source}|{project}|{version}|{args.mode}|{dependency_identity}|{consumer_identity}".encode()
+        (
+            f"{source}|{project}|{version}|{args.mode}|{dependency_identity}|{consumer_identity}|"
+            f"{corpus_profile}|{token_budget}|{max_files}|{max_images}|{include_paths}|{exclude_paths}"
+        ).encode()
     ).hexdigest()
     stale_index_detected = False
     if manifest_path.is_file() and not getattr(args, "force", False):
@@ -845,17 +1010,24 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
     before = len(runner.history)
     dependency = _run_isolated_index(
         role="dependency", source=source, identity=dependency_identity, alias=dependency_alias,
-        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph, runner=runner,
+        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph,
+        corpus_profile=corpus_profile, token_budget=token_budget, max_files=max_files, max_images=max_images,
+        include_paths=include_paths, exclude_paths=exclude_paths,
+        runner=runner,
     )
     consumer = dependency if shared_consumer_index else _run_isolated_index(
         role="consumer", source=project, identity=consumer_identity, alias=consumer_alias,
-        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph, runner=runner,
+        scope=scope, project=project, mode=args.mode, allow_global_graph=args.allow_global_graph,
+        corpus_profile=corpus_profile, token_budget=token_budget, max_files=max_files, max_images=max_images,
+        include_paths=include_paths, exclude_paths=exclude_paths,
+        runner=runner,
     )
     group_alias = f"{alias_base}-group"
     group_results: list[CommandResult] = []
     group_environment = gitnexus_env(scope, Path(dependency["gitnexus_source"]), create=not runner.dry_run)
     group_cwd = Path(dependency["gitnexus_source"]) if not runner.dry_run else project
-    if args.allow_gitnexus_group:
+    indexes_usable_for_group = dependency["status"] != "PARTIAL" and consumer["status"] != "PARTIAL"
+    if args.allow_gitnexus_group and indexes_usable_for_group:
         group_results.append(runner.run(
             ["npx", "--no-install", "gitnexus", "group", "create", group_alias], cwd=group_cwd, env=group_environment,
         ))
@@ -872,7 +1044,7 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
             ["npx", "--no-install", "gitnexus", "group", "sync", group_alias, "--skip-embeddings", "--json"],
             cwd=group_cwd, env=group_environment,
         ))
-    group_ok = not args.allow_gitnexus_group or all(result.ok for result in group_results)
+    group_ok = not args.allow_gitnexus_group or (indexes_usable_for_group and all(result.ok for result in group_results))
     role_statuses = {dependency["status"], consumer["status"]}
     if runner.dry_run:
         status = "DRY_RUN"
@@ -909,6 +1081,7 @@ def index_sources(args: argparse.Namespace, runner: CommandRunner, source_path: 
         "timestamp": utc_now(),
         "source_identity": dependency_identity,
         "consumer_source_identity": consumer_identity,
+        "corpus": {"dependency": dependency.get("preflight", {}), "consumer": consumer.get("preflight", {})},
         "stale_index_detected": stale_index_detected,
         "health": health,
         "indexes": {"consumer": consumer, "dependency": dependency},
@@ -1244,6 +1417,268 @@ def research_indexes(
         "change_risk": change_risk,
         "parse_errors": parse_errors,
     }
+
+
+def _write_json_artifact(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _audit_event(scope: Path, event: str, **details: Any) -> None:
+    scope.mkdir(parents=True, exist_ok=True)
+    record = {"timestamp": utc_now(), "event": event, **details}
+    with (scope / "events.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def audit_graph_facets(
+    indexing: Mapping[str, Any],
+    question: str,
+    runner: CommandRunner,
+    *,
+    mode: str,
+    facet_budget: int,
+    force: bool,
+) -> dict[str, Any]:
+    """Run small, explicit Graphify questions and checkpoint their results."""
+
+    manifest = indexing.get("manifest", {})
+    dependency_graph = Path(str(manifest.get("graph_path", "")))
+    consumer_graph = Path(str(manifest.get("consumer_graph_path", "")))
+    scope = Path(str(indexing.get("artifact_dir", "."))) / "audit" / safe_slug(question, None)
+    checkpoint_path = scope / "04-query-results.json"
+    signature = audit_checkpoint_signature({
+        "question": question,
+        "mode": mode,
+        "facet_budget": facet_budget,
+        "source_identity": manifest.get("source_identity"),
+        "consumer_source_identity": manifest.get("consumer_source_identity"),
+        "facets": audit_facets(question),
+        "sgrx_version": VERSION,
+    })
+    if not runner.dry_run and not force and checkpoint_path.is_file() and dependency_graph.is_file() and consumer_graph.is_file():
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            if checkpoint.get("signature") == signature and isinstance(checkpoint.get("facets"), dict):
+                _audit_event(scope, "checkpoint_reused", path=str(checkpoint_path))
+                return {
+                    "facets": checkpoint["facets"],
+                    "checkpoint": {"status": "REUSED", "path": str(checkpoint_path), "signature": signature},
+                    "scope": str(scope),
+                }
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    facets: dict[str, Any] = {}
+    for name, facet_question in audit_facets(question).items():
+        dependency_terms = graph_query_terms(dependency_graph, facet_question)
+        consumer_terms = graph_query_terms(consumer_graph, facet_question)
+        if runner.dry_run and not dependency_terms:
+            dependency_terms = list(dict.fromkeys(token for token in _graph_tokens(facet_question) if token not in QUERY_STOPWORDS))[:12]
+        if runner.dry_run and not consumer_terms:
+            consumer_terms = list(dependency_terms)
+        dependency_result = None
+        consumer_result = None
+        if dependency_terms and (runner.dry_run or dependency_graph.is_file()):
+            dependency_result = runner.run(
+                ["graphify", "query", " ".join(dependency_terms), "--graph", str(dependency_graph), "--budget", str(facet_budget)],
+                cwd=dependency_graph.parent.parent if dependency_graph.is_file() else Path(args_project(indexing)),
+            )
+        if consumer_terms and (runner.dry_run or consumer_graph.is_file()):
+            consumer_result = runner.run(
+                ["graphify", "query", " ".join(consumer_terms), "--graph", str(consumer_graph), "--budget", str(facet_budget)],
+                cwd=consumer_graph.parent.parent if consumer_graph.is_file() else Path(args_project(indexing)),
+            )
+        dependency_nodes, dependency_error = _parse_graph_query_nodes(dependency_result)
+        consumer_nodes, consumer_error = _parse_graph_query_nodes(consumer_result)
+        requested_tokens = set(_graph_tokens(facet_question)) - QUERY_STOPWORDS
+        facets[name] = {
+            "question": facet_question,
+            "dependency_terms": dependency_terms,
+            "consumer_terms": consumer_terms,
+            "dependency_coverage": round(len(dependency_terms) / max(1, len(requested_tokens)), 4),
+            "consumer_coverage": round(len(consumer_terms) / max(1, len(requested_tokens)), 4),
+            "dependency_nodes": dependency_nodes[:40],
+            "consumer_nodes": consumer_nodes[:40],
+            "errors": [error for error in (dependency_error, consumer_error) if error],
+            "commands": [item for item in (result_payload(dependency_result), result_payload(consumer_result)) if item],
+        }
+    checkpoint = {"signature": signature, "saved_at": utc_now(), "facets": facets}
+    if not runner.dry_run:
+        _write_json_artifact(checkpoint_path, checkpoint)
+        _audit_event(scope, "queries_completed", facets=len(facets), path=str(checkpoint_path))
+    return {
+        "facets": facets,
+        "checkpoint": {"status": "DRY_RUN" if runner.dry_run else "SAVED", "path": str(checkpoint_path), "signature": signature},
+        "scope": str(scope),
+    }
+
+
+def args_project(indexing: Mapping[str, Any]) -> str:
+    manifest = indexing.get("manifest", {})
+    return str(manifest.get("consumer_source_path") or manifest.get("source_path") or ".")
+
+
+def audit_practice_mappings(
+    facets: Mapping[str, Any],
+    package: str,
+    version: str,
+) -> list[dict[str, Any]]:
+    mappings: list[dict[str, Any]] = []
+    for name, facet in facets.items():
+        dependency_nodes = list(facet.get("dependency_nodes", []))
+        consumer_nodes = list(facet.get("consumer_nodes", []))
+        dependency = dependency_nodes[0] if dependency_nodes else {}
+        consumer = consumer_nodes[0] if consumer_nodes else {}
+        status = "INFERRED" if dependency and consumer else "AMBIGUOUS"
+        dependency_location = None
+        if dependency.get("source"):
+            dependency_location = f"{package}@{version}:{dependency['source']}:{dependency.get('location') or 'unknown'}"
+        consumer_location = None
+        if consumer.get("source"):
+            consumer_location = f"{consumer['source']}:{consumer.get('location') or 'unknown'}"
+        mappings.append({
+            "facet": name,
+            "practice": dependency.get("label") or f"{name} practice not located",
+            "consumer_equivalent": consumer.get("label") or None,
+            "recommendation": AUDIT_RECOMMENDATIONS[name],
+            "gap": (
+                "Both graphs contain relevant structures; verify semantic equivalence before implementation."
+                if dependency and consumer
+                else "One side has no graph evidence for this facet; retain the recommendation as a hypothesis."
+            ),
+            "consumer_location": consumer_location,
+            "package": package,
+            "public_api": dependency.get("label") or name,
+            "dependency_location": dependency_location,
+            "gitnexus_symbol_or_process": None,
+            "graphify_relationship": f"faceted {name} relevance; cross-repository transfer is inferred",
+            "evidence_status": status,
+            "confidence": 0.76 if status == "INFERRED" else 0.42,
+            "uncertainties": "Graph relevance does not prove that adopting the practice improves SGRX.",
+        })
+    return mappings
+
+
+def audit_index_context(
+    indexing: Mapping[str, Any],
+    question: str,
+    runner: CommandRunner,
+    *,
+    mode: str,
+    force: bool,
+    facet_result: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Checkpoint the broader Graphify/GitNexus context used by an audit."""
+
+    scope = Path(str(facet_result["scope"]))
+    path = scope / "04-index-context.json"
+    signature = str(facet_result.get("checkpoint", {}).get("signature") or "")
+    if not runner.dry_run and not force and signature and path.is_file():
+        try:
+            checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            if checkpoint.get("signature") == signature and isinstance(checkpoint.get("research"), dict):
+                _audit_event(scope, "checkpoint_reused", path=str(path))
+                return checkpoint["research"], {"status": "REUSED", "path": str(path), "signature": signature}
+        except (OSError, json.JSONDecodeError):
+            pass
+    research = research_indexes(dict(indexing), question, [], runner, mode)
+    if not runner.dry_run:
+        _write_json_artifact(path, {"signature": signature, "saved_at": utc_now(), "research": research})
+        _audit_event(scope, "index_context_completed", path=str(path))
+    return research, {
+        "status": "DRY_RUN" if runner.dry_run else "SAVED",
+        "path": str(path),
+        "signature": signature,
+    }
+
+
+def analysis_index_research(
+    indexing: Mapping[str, Any],
+    question: str,
+    evidence: Sequence[Mapping[str, Any]],
+    runner: CommandRunner,
+    *,
+    mode: str,
+    force: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Checkpoint analyze-mode graph and symbol queries across identical runs."""
+
+    manifest = indexing.get("manifest", {})
+    scope = Path(str(indexing.get("artifact_dir", "."))) / "analyze" / safe_slug(question, None)
+    path = scope / "04-query-results.json"
+    signature = audit_checkpoint_signature({
+        "question": question,
+        "mode": mode,
+        "source_identity": manifest.get("source_identity"),
+        "consumer_source_identity": manifest.get("consumer_source_identity"),
+        "consumer_evidence": [
+            {"location": row.get("consumer_location"), "api": row.get("public_api")}
+            for row in evidence
+        ],
+        "sgrx_version": VERSION,
+    })
+    if not runner.dry_run and not force and path.is_file():
+        try:
+            checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            if checkpoint.get("signature") == signature and isinstance(checkpoint.get("research"), dict):
+                _audit_event(scope, "checkpoint_reused", path=str(path))
+                return checkpoint["research"], {"status": "REUSED", "path": str(path), "signature": signature}
+        except (OSError, json.JSONDecodeError):
+            pass
+    research = research_indexes(dict(indexing), question, list(evidence), runner, mode)
+    if not runner.dry_run:
+        _write_json_artifact(path, {"signature": signature, "saved_at": utc_now(), "research": research})
+        _audit_event(scope, "analysis_queries_completed", path=str(path))
+    return research, {
+        "status": "DRY_RUN" if runner.dry_run else "SAVED",
+        "path": str(path),
+        "signature": signature,
+    }
+
+
+def _apply_report_verification(payload: dict[str, Any]) -> dict[str, Any]:
+    verification = verify_report(payload)
+    payload["verification"] = verification
+    payload["run_status"] = verification["status"]
+    failures = [item["message"] for item in verification.get("failures", [])]
+    if failures:
+        payload.setdefault("limitations", []).extend(
+            f"Verification gate failed: {message}" for message in failures
+        )
+    return payload
+
+
+def _write_audit_artifacts(payload: dict[str, Any], facet_result: Mapping[str, Any], runner: CommandRunner) -> None:
+    if runner.dry_run:
+        return
+    scope = Path(str(facet_result["scope"]))
+    artifacts = [
+        scope / "01-resolution.json",
+        scope / "02-corpus-plan.json",
+        scope / "03-index-manifest.json",
+        scope / "04-query-results.json",
+        scope / "04-index-context.json",
+        scope / "05-evidence.json",
+        scope / "06-verification.json",
+        scope / "REPORT.md",
+    ]
+    _write_json_artifact(artifacts[0], payload.get("provenance", {}))
+    _write_json_artifact(artifacts[1], payload.get("indexing", {}).get("manifest", {}).get("corpus", {}))
+    _write_json_artifact(artifacts[2], payload.get("indexing", {}).get("manifest", {}))
+    if not artifacts[3].is_file():
+        _write_json_artifact(artifacts[3], {"facets": payload.get("audit_facets", {})})
+    if not artifacts[4].is_file():
+        _write_json_artifact(artifacts[4], {"research": payload.get("research", {})})
+    _write_json_artifact(artifacts[5], {"practice_mappings": payload.get("practice_mappings", []), "evidence": payload.get("evidence", [])})
+    _write_json_artifact(artifacts[6], payload.get("verification", {}))
+    artifacts[7].write_text(markdown_report(payload), encoding="utf-8")
+    manifest_path = scope / "RUN_MANIFEST.md"
+    manifest_path.write_text(handoff_markdown(payload, [*artifacts, manifest_path]), encoding="utf-8")
+    payload["audit_artifacts"] = {"scope": str(scope), "run_manifest": str(manifest_path), "report": str(artifacts[7])}
+    _audit_event(scope, "report_verified", status=payload.get("run_status"), report=str(artifacts[7]))
 
 
 def implementation_rows(
@@ -1588,6 +2023,12 @@ def _repository_research(
             project=Path(args.project).expanduser().resolve(),
             mode=args.mode,
             allow_global_graph=False,
+            corpus_profile="full",
+            token_budget=0,
+            max_files=0,
+            max_images=-1,
+            include_paths=(),
+            exclude_paths=(),
             runner=runner,
         )
     else:
@@ -1775,6 +2216,34 @@ def research_mode(args: argparse.Namespace, runner: CommandRunner) -> dict[str, 
     return payload
 
 
+def _write_analysis_artifacts(payload: dict[str, Any], runner: CommandRunner) -> None:
+    if runner.dry_run or not payload.get("indexing", {}).get("artifact_dir"):
+        return
+    scope = Path(payload["indexing"]["artifact_dir"]) / "analyze" / safe_slug(str(payload["question"]), None)
+    artifacts = [
+        scope / "01-resolution.json",
+        scope / "02-corpus-plan.json",
+        scope / "03-index-manifest.json",
+        scope / "04-query-results.json",
+        scope / "05-evidence.json",
+        scope / "06-verification.json",
+        scope / "REPORT.md",
+    ]
+    payload["analysis_artifacts"] = {"scope": str(scope), "report": str(artifacts[6]), "run_manifest": str(scope / "RUN_MANIFEST.md")}
+    _write_json_artifact(artifacts[0], payload.get("provenance", {}))
+    _write_json_artifact(artifacts[1], payload.get("indexing", {}).get("manifest", {}).get("corpus", {}))
+    _write_json_artifact(artifacts[2], payload.get("indexing", {}).get("manifest", {}))
+    if not artifacts[3].is_file():
+        _write_json_artifact(artifacts[3], {"research": payload.get("research", {})})
+    _write_json_artifact(artifacts[4], {"evidence": payload.get("evidence", []), "relationships": payload.get("relationships", {})})
+    _write_json_artifact(artifacts[5], payload.get("verification", {}))
+    artifacts[6].parent.mkdir(parents=True, exist_ok=True)
+    artifacts[6].write_text(markdown_report(payload), encoding="utf-8")
+    manifest_path = scope / "RUN_MANIFEST.md"
+    manifest_path.write_text(handoff_markdown(payload, [*artifacts, manifest_path]), encoding="utf-8")
+    _audit_event(scope, "report_verified", status=payload.get("run_status"), report=str(artifacts[6]))
+
+
 def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     project = Path(args.project).expanduser().resolve()
     version_report = doctor(runner)
@@ -1783,7 +2252,18 @@ def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     source = Path(provenance["cache_path"]) if provenance.get("cache_path") else None
     indexing = index_sources(args, runner, source)
     evidence = scan_consumer(project, args.package)
-    research = research_indexes(indexing, args.question, evidence, runner, args.mode) if indexing["status"] in {"HEALTHY", "DEGRADED", "REUSED"} else {}
+    if indexing["status"] in {"HEALTHY", "DEGRADED", "REUSED"}:
+        research, analysis_checkpoint = analysis_index_research(
+            indexing,
+            args.question,
+            evidence,
+            runner,
+            mode=args.mode,
+            force=args.force,
+        )
+    else:
+        research = {}
+        analysis_checkpoint = {"status": "NOT_WRITTEN"}
     graph_evidence = [
         {
             "consumer_location": None,
@@ -1828,7 +2308,7 @@ def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     paths.extend(research.get("gitnexus_group_payload", {}).get("processes", []))
     for context in research.get("contexts", []):
         paths.extend(context.get("processes", []))
-    return {
+    payload = {
         "format_version": "1.0",
         "brand": BRAND,
         "question": args.question,
@@ -1850,8 +2330,112 @@ def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
         "commands": command_log(runner.history),
         "indexing": indexing,
         "research": research,
+        "checkpoint": analysis_checkpoint,
         "timestamp": utc_now(),
     }
+    _apply_report_verification(payload)
+    _write_analysis_artifacts(payload, runner)
+    return payload
+
+
+def audit(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
+    """Compare benchmark practices with the consumer without inventing a runtime boundary."""
+
+    if args.facet_budget <= 0:
+        raise SGRXError("Facet budget must be greater than zero.")
+    version_report = doctor(runner)
+    provenance = local_source_provenance(args, runner) if getattr(args, "source_path", None) else resolve_dependency(args, runner)
+    provenance["tool_versions"] = _research_tool_versions(version_report["tools"])
+    source = Path(provenance["cache_path"]) if provenance.get("cache_path") else None
+    indexing = index_sources(args, runner, source)
+    queryable = indexing.get("status") in {"DRY_RUN", "HEALTHY", "DEGRADED", "REUSED"}
+    if queryable:
+        facet_result = audit_graph_facets(
+            indexing,
+            args.question,
+            runner,
+            mode=args.mode,
+            facet_budget=args.facet_budget,
+            force=args.force,
+        )
+        research, context_checkpoint = audit_index_context(
+            indexing,
+            args.question,
+            runner,
+            mode=args.mode,
+            force=args.force,
+            facet_result=facet_result,
+        )
+    else:
+        scope = Path(str(indexing.get("artifact_dir", Path(args.project) / ".sgrx"))) / "audit" / safe_slug(args.question, None)
+        facet_result = {"facets": {}, "checkpoint": {"status": "NOT_WRITTEN"}, "scope": str(scope)}
+        research = {}
+        context_checkpoint = {"status": "NOT_WRITTEN", "path": str(scope / "04-index-context.json")}
+    version = str(provenance.get("resolved_version") or provenance.get("ref") or "resolved")
+    mappings = audit_practice_mappings(facet_result["facets"], args.package, version)
+    external_symbols = implementation_rows(research, args.package, version)
+    evidence = [*mappings, *external_symbols]
+    limitations: list[str] = []
+    if indexing.get("status") in {"UNAVAILABLE", "PARTIAL"}:
+        limitations.append("Corpus preflight or isolated indexing did not complete; practice mappings remain incomplete.")
+    if indexing.get("status") == "DEGRADED" or (
+        indexing.get("status") == "REUSED" and indexing.get("manifest", {}).get("status") == "DEGRADED"
+    ):
+        limitations.append("At least one index is degraded; query completeness is not claimed.")
+    manifest = indexing.get("manifest", {})
+    for role, plan in manifest.get("corpus", {}).items():
+        for violation in plan.get("violations", []):
+            limitations.append(f"{role} corpus preflight: {violation}.")
+    for name, facet in facet_result["facets"].items():
+        if not facet.get("dependency_nodes") or not facet.get("consumer_nodes"):
+            limitations.append(f"Facet {name!r} lacks graph evidence on one side.")
+        limitations.extend(f"Facet {name!r}: {error}" for error in facet.get("errors", []))
+    limitations.extend(research.get("parse_errors", []))
+    nexus_payload = research.get("gitnexus_payload", {})
+    if nexus_payload.get("warning"):
+        limitations.append(f"GitNexus warning: {nexus_payload['warning']}")
+    paths = list(nexus_payload.get("processes", []))
+    paths.extend(research.get("consumer_gitnexus_payload", {}).get("processes", []))
+    architecture = [
+        f"{item['facet']}: {item['practice']} -> {item['recommendation']} ({item['evidence_status']})"
+        for item in mappings
+    ]
+    payload = {
+        "format_version": "1.0",
+        "brand": BRAND,
+        "audit_mode": True,
+        "question": args.question,
+        "short_answer": "SGRX compared benchmark and consumer indexes by explicit practice facets; transfer recommendations remain inferred rather than runtime-proven.",
+        "mode": args.mode,
+        "provenance": provenance,
+        "consumer_call_sites": [row for row in mappings if row.get("consumer_location")],
+        "external_implementation": [row for row in evidence if row.get("dependency_location")],
+        "end_to_end_path": paths or ["audit -> corpus preflight -> isolated indexes -> faceted queries -> evidence mapping -> verification gate"],
+        "architecture_overview": architecture,
+        "edge_cases": [
+            "A documentation benchmark may have no GitNexus execution flow.",
+            "A missing facet on either graph keeps the mapping AMBIGUOUS.",
+            "Images and media remain excluded unless the corpus profile explicitly includes them.",
+        ],
+        "deprecations": [],
+        "change_risk": {"status": "NOT_REQUESTED", "risk": "UNKNOWN", "direct_callers": [], "processes": []},
+        "evidence": evidence,
+        "relationships": {status: [row for row in evidence if row["evidence_status"] == status] for status in EVIDENCE_STATUSES},
+        "limitations": list(dict.fromkeys(limitations)),
+        "recommended_next_steps": list(dict.fromkeys(item["recommendation"] for item in mappings)),
+        "tool_versions": version_report["tools"],
+        "commands": command_log(runner.history),
+        "indexing": indexing,
+        "research": research,
+        "audit_facets": facet_result["facets"],
+        "practice_mappings": mappings,
+        "checkpoint": facet_result["checkpoint"],
+        "context_checkpoint": context_checkpoint,
+        "timestamp": utc_now(),
+    }
+    _apply_report_verification(payload)
+    _write_audit_artifacts(payload, facet_result, runner)
+    return payload
 
 
 def compare(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
@@ -1964,6 +2548,7 @@ def markdown_report(data: dict[str, Any]) -> str:
         "## Short answer",
         "",
         str(data.get("short_answer") or "No supported conclusion is available."),
+        *(["", f"**Run status:** `{data['run_status']}`"] if data.get("run_status") else []),
         "",
         "## Analyzed version and provenance",
         "",
@@ -2076,6 +2661,43 @@ def add_dependency(parser: argparse.ArgumentParser, *, project_required: bool = 
     parser.add_argument("--ref")
 
 
+def add_corpus_options(parser: argparse.ArgumentParser, *, audit_defaults: bool = False) -> None:
+    parser.add_argument(
+        "--corpus-profile",
+        choices=CORPUS_PROFILES,
+        default="code-docs" if audit_defaults else "full",
+        help="Select Graphify inputs; practice audits exclude images and media by default.",
+    )
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=300_000 if audit_defaults else 0,
+        help="Stop before Graphify when the conservative corpus estimate exceeds this value; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=300 if audit_defaults else 0,
+        help="Maximum selected corpus files; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=0 if audit_defaults else -1,
+        help="Maximum selected images; -1 disables the limit.",
+    )
+    parser.add_argument(
+        "--include-path",
+        action="append",
+        help="Include only this repository-relative file or directory; repeat for multiple scopes.",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        action="append",
+        help="Exclude this repository-relative file or directory; repeat for multiple scopes.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = BrandedParser(prog="sgrx.py", description="Orchestrate safe, version-accurate source graph research.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -2086,12 +2708,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(resolve_parser); add_dependency(resolve_parser)
     index_parser = sub.add_parser("index", help="Build isolated Graphify and GitNexus indexes.")
     add_common(index_parser); add_dependency(index_parser)
+    add_corpus_options(index_parser)
     index_parser.add_argument("--source-path"); index_parser.add_argument("--version"); index_parser.add_argument("--force", action="store_true")
     analyze_parser = sub.add_parser("analyze", help="Trace consumer usage into dependency source.")
     add_common(analyze_parser); add_dependency(analyze_parser)
+    add_corpus_options(analyze_parser)
     analyze_parser.add_argument("--question", required=True); analyze_parser.add_argument("--source-path"); analyze_parser.add_argument("--force", action="store_true")
+    audit_parser = sub.add_parser("audit", help="Compare benchmark practices with a consumer without claiming a runtime dependency.")
+    add_common(audit_parser)
+    audit_parser.add_argument("--benchmark", dest="package", required=True)
+    audit_parser.add_argument("--project", required=True)
+    audit_parser.add_argument("--registry", choices=REGISTRIES, default="github")
+    audit_parser.add_argument("--ref")
+    audit_parser.add_argument("--question", required=True)
+    audit_parser.add_argument("--source-path")
+    audit_parser.add_argument("--force", action="store_true")
+    audit_parser.add_argument("--facet-budget", type=int, default=1_200)
+    add_corpus_options(audit_parser, audit_defaults=True)
     compare_parser = sub.add_parser("compare", help="Resolve two dependency versions for isolated comparison.")
     add_common(compare_parser); add_dependency(compare_parser, project_required=False)
+    add_corpus_options(compare_parser)
     compare_parser.add_argument("--from", dest="from_version", required=True); compare_parser.add_argument("--to", dest="to_version", required=True); compare_parser.add_argument("--question", required=True)
     research_parser = sub.add_parser("research", help="Rank paper/repository candidates, index selected evidence, and generate a build plan.")
     add_common(research_parser, include_cross_repository_options=False)
@@ -2139,6 +2775,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = {"brand": BRAND, "indexing": index_sources(args, runner), "commands": command_log(runner.history)}
         elif args.command == "analyze":
             payload = analyze(args, runner)
+        elif args.command == "audit":
+            payload = audit(args, runner)
         elif args.command == "compare":
             payload = compare(args, runner)
         elif args.command == "research":

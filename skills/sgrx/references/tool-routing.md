@@ -11,6 +11,7 @@
 | Compare versions | opensrc twice | Graphify and GitNexus separately | Two provenances and evidence-backed differences |
 | Assess a local change | GitNexus impact | Consumer graph | Direct/indirect callers, processes, risk |
 | Research how to build a system | Current web search + primary papers | OpenSrc, Graphify, GitNexus | Ranked evidence, isolated graphs, detailed build plan |
+| Audit external practices | Graphify facets | OpenSrc, GitNexus, direct source inspection | Practice-to-consumer mapping, gap, recommendation, evidence status |
 
 ## Resolve source safely
 
@@ -22,7 +23,7 @@ Never execute files inside the returned path. Never run a package manager in the
 
 ## Isolate Graphify state
 
-Create separate graphs for the consumer and dependency. Run `graphify extract <source> --out <artifact-scope>` so generated state never lands in fetched source. Run `graphify query`, `graphify path`, or `graphify explain` against the explicit graph path. Reuse an index only when its content identity, tool inputs, output path, and health checks match. Mark mismatched indexes stale and incomplete search capability degraded.
+Create separate graphs for the consumer and dependency or benchmark. Run corpus preflight first and stop before extraction when a configured token, file, or image limit is exceeded. Use a filtered, ephemeral input snapshot for non-`full` corpus profiles and write Graphify outputs to the artifact scope so generated state never lands in fetched source. Run `graphify query`, `graphify path`, or `graphify explain` against the explicit graph path. Reuse an index only when its content identity, corpus profile, budgets, tool inputs, output path, and health checks match. Mark mismatched indexes stale and incomplete search capability degraded. Treat zero-node sources, extraction issues, and cross-chunk ID collisions as structured health findings rather than burying them in stderr.
 
 Create a global or merged graph only when `--allow-global-graph` or equivalent explicit consent is present. Preserve edge direction and evidence labels. Refuse name-only joins.
 
@@ -37,6 +38,8 @@ npx gitnexus analyze <source-path> --index-only --name <package-version-alias>
 Use a safe argument vector and prevent implicit npx downloads when orchestrating unattended analysis. Sandbox HOME and USERPROFILE under the artifact scope and set a Git discovery ceiling at each snapshot boundary so GitNexus cannot mutate the user's global registry or inherit an unrelated parent commit. Verify both original source identities after indexing. Use `group create`, add both `consumer` and `dependency` roles, then use `group sync`, `group query`, and `group impact` only after group opt-in.
 
 Before changing a symbol, query upstream impact. Report direct callers, affected processes, and the GitNexus risk level. Pause for confirmation at HIGH or CRITICAL. Before committing an authorized change, run `gitnexus detect-changes` and include its result in the handoff.
+
+When keyword queries report missing FTS indexes, run one forced rebuild against the same isolated snapshot and alias, then repeat the health query. Never retry indefinitely and never rebuild an index in fetched source or global state. Keep the run degraded if search remains unavailable; direct symbol context may still be reported separately.
 
 ## Select depth
 

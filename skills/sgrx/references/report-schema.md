@@ -61,6 +61,12 @@ Use this stable top-level shape:
   "recommended_next_steps": [],
   "tool_versions": {},
   "commands": [],
+  "verification": {
+    "status": "HEALTHY|DEGRADED|DRY_RUN",
+    "checks": [],
+    "failures": []
+  },
+  "run_status": "HEALTHY|DEGRADED|DRY_RUN",
   "timestamp": "RFC 3339 string"
 }
 ```
@@ -74,6 +80,8 @@ Record the requested package, registry or repository, resolved version, tag/ref,
 Record `consumer_location`, `package`, `public_api`, `dependency_location`, `gitnexus_symbol_or_process`, `graphify_relationship`, `evidence_status`, `confidence`, and `uncertainties`. Validate the status against `EXTRACTED`, `INFERRED`, and `AMBIGUOUS`.
 
 Never omit a section to conceal unavailable evidence. Use an empty collection and explain the reason in limitations.
+
+Practice audit mode additionally records `audit_mode`, `audit_facets`, `practice_mappings`, a reusable query `checkpoint`, and durable artifact paths. Every mapping records the facet, external practice, consumer equivalent, gap, recommendation, portable locations, evidence status, confidence, and uncertainty. A mapping may be `INFERRED` when both graphs provide relevant anchors, but never `EXTRACTED` merely because similar concepts occur in both repositories.
 
 ## Emit research-mode fields
 
