@@ -6,6 +6,8 @@ All notable changes to SGRX are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-17
+
 ### Added
 
 - Portable multi-agent installer for Codex, Claude Code, Cline, and clients that discover the shared `.agents/skills` location.
@@ -59,6 +61,8 @@ All notable changes to SGRX are documented in this file. The format follows
 
 - Initial public repository structure, orchestration CLI, deterministic tests, and Codex skill metadata.
 
+[Unreleased]: https://github.com/alzenkastrati/sgrx/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/alzenkastrati/sgrx/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/alzenkastrati/sgrx/compare/v0.2.1...v0.4.1
 [0.2.1]: https://github.com/alzenkastrati/sgrx/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alzenkastrati/sgrx/releases/tag/v0.2.0

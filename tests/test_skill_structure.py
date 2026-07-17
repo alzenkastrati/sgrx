@@ -158,7 +158,13 @@ class SkillStructureTests(unittest.TestCase):
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         self.assertIn(f'VERSION = "{version}"', (SKILL / "scripts" / "sgrx.py").read_text(encoding="utf-8"))
-        self.assertIn(f"version: **{version}**", (ROOT / "README.md").read_text(encoding="utf-8"))
+        for path in (ROOT / "README.md", ROOT / "README.de.md"):
+            self.assertIn(f"version: **{version}**", path.read_text(encoding="utf-8").lower())
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        released = re.search(r"(?m)^## \[(\d+\.\d+\.\d+)\]", changelog)
+        self.assertIsNotNone(released)
+        self.assertEqual(released.group(1), version)
+        self.assertIn(f"[{version}]: https://github.com/alzenkastrati/sgrx/compare/", changelog)
 
     def test_ci_uses_no_package_downloads(self):
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
