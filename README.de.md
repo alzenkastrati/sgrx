@@ -225,7 +225,7 @@ SGRX analysiert standardmäßig. Es verändert deine Anwendung nur, wenn du ausd
 - Audit- und Analyse-Läufe schreiben dauerhafte Resolution-, Corpus-, Index-, Query-, Evidenz-, Verifikations-, Report- und Handoff-Artefakte in ihren isolierten `.sgrx`-Bereich.
 - Unter Windows werden unvollständige Checkouts mit langen Pfaden in einem isolierten kurzen Cache erneut versucht. Globale Git-Einstellungen werden nicht verändert.
 - Reine Paper- oder Dokumentgraphen benötigen ein unterstütztes semantisches Graphify-Backend. Fehlt dieses, meldet SGRX den Paper-Graphen als `PARTIAL`, statt Beziehungen zu erfinden.
-- Meldet GitNexus fehlende FTS-Indizes, führt SGRX genau einen erzwungenen Neuaufbau im isolierten Snapshot aus. Ist die Suche danach weiterhin nicht verfügbar, bleibt der Lauf sichtbar eingeschränkt.
+- Unter Windows stuft SGRX die generische GitNexus-Meldung zu fehlenden FTS-Indizes als nicht verfügbaren FTS-Laufzeitpfad ein und baut einen intakten Index nicht neu auf. Die Stichwortsuche bleibt sichtbar eingeschränkt; Graphify sowie symbolische GitNexus-Abfragen mit `context` und `impact` bleiben verfügbar. Auf anderen Plattformen werden tatsächlich fehlende FTS-Indizes im isolierten Snapshot genau einmal neu aufgebaut.
 - Graphify-Dateien ohne Knoten, Extraktionsprobleme und Cross-Chunk-ID-Kollisionen sind strukturierte Health-Fehler und können das Verifikationsgate nicht mehr als gesund passieren.
 - Die CLI durchsucht das Web nicht stillschweigend selbst. Codex findet aktuelle Paper und Repositories, die lokale CLI bewertet und analysiert die festgehaltenen Kandidaten.
 

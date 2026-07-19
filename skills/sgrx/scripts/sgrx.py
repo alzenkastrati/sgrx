@@ -53,6 +53,12 @@ REGISTRIES = ("npm", "pypi", "crates", "github")
 MAX_OUTPUT = 200_000
 HASH_CHUNK_SIZE = 1024 * 1024
 WINDOWS_LONG_PATH_PATTERN = re.compile(r"(?:filename|path) too long|long path", re.I)
+GITNEXUS_FTS_AVAILABLE = "AVAILABLE"
+GITNEXUS_FTS_INDEXES_MISSING = "FTS_INDEXES_MISSING"
+GITNEXUS_FTS_RUNTIME_UNAVAILABLE = "FTS_RUNTIME_UNAVAILABLE"
+GITNEXUS_FTS_QUERY_ERROR = "QUERY_ERROR"
+GITNEXUS_FTS_WARNING = "WARNING"
+GITNEXUS_FTS_UNKNOWN = "UNKNOWN"
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".mjs", ".py", ".rs", ".ts", ".tsx"}
 RESEARCH_CODE_SUFFIXES = SOURCE_SUFFIXES | {".bash", ".fish", ".kt", ".kts", ".php", ".rb", ".scala", ".sh", ".swift", ".vue"}
 SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc", "credentials", "credentials.json", "id_rsa", "id_ed25519"}
@@ -401,8 +407,33 @@ def gitnexus_status_ok(result: CommandResult) -> bool:
     return result.ok and gitnexus_status_state(result) in {"HEALTHY", "ISOLATED"}
 
 
-def gitnexus_fts_missing(result: CommandResult) -> bool:
-    return "fts indexes missing" in f"{result.stdout}\n{result.stderr}".casefold()
+def gitnexus_fts_state(result: CommandResult, platform_name: str | None = None) -> str:
+    """Classify keyword-search health without confusing Windows runtime limits with index loss."""
+
+    text = f"{result.stdout}\n{result.stderr}".casefold()
+    current_platform = (platform_name or sys.platform).casefold()
+    if "query_fts_index is not defined" in text:
+        return GITNEXUS_FTS_RUNTIME_UNAVAILABLE
+    if "fts indexes missing" in text:
+        if current_platform in {"win32", "windows"}:
+            return GITNEXUS_FTS_RUNTIME_UNAVAILABLE
+        return GITNEXUS_FTS_INDEXES_MISSING
+    if not result.ok:
+        return GITNEXUS_FTS_QUERY_ERROR
+    if "warning" in text:
+        return GITNEXUS_FTS_WARNING
+    return GITNEXUS_FTS_AVAILABLE
+
+
+def gitnexus_fts_missing(result: CommandResult, platform_name: str | None = None) -> bool:
+    """Return true only for recoverable index loss, never for the Windows runtime limitation."""
+
+    return gitnexus_fts_state(result, platform_name) == GITNEXUS_FTS_INDEXES_MISSING
+
+
+def gitnexus_keyword_search_ok(result: CommandResult, state: str | None = None) -> bool:
+    resolved_state = state or gitnexus_fts_state(result)
+    return result.ok and resolved_state == GITNEXUS_FTS_AVAILABLE
 
 
 def graphify_health_issues(result: CommandResult) -> dict[str, Any]:
@@ -843,7 +874,7 @@ def _run_isolated_index(
             "gitnexus_home": environment["HOME"],
             "preflight": preflight,
             "graphify_issues": {},
-            "gitnexus_recovery": {"attempted": False, "succeeded": False},
+            "gitnexus_recovery": {"attempted": False, "succeeded": False, "reason": "not_run"},
             "health": {
                 "preflight_ok": False,
                 "graph_exists": False,
@@ -852,6 +883,7 @@ def _run_isolated_index(
                 "gitnexus_status_ok": False,
                 "gitnexus_status_state": "NOT_RUN",
                 "gitnexus_search_ok": False,
+                "gitnexus_search_state": "NOT_RUN",
                 "source_unchanged": source_unchanged,
             },
         }
@@ -883,9 +915,11 @@ def _run_isolated_index(
         cwd=snapshot if not runner.dry_run else project,
         env=environment,
     )
-    recovery = {"attempted": False, "succeeded": False}
-    if not runner.dry_run and gitnexus_fts_missing(nexus_search):
+    fts_state = "DRY_RUN" if runner.dry_run else gitnexus_fts_state(nexus_search)
+    recovery: dict[str, Any] = {"attempted": False, "succeeded": False, "reason": None}
+    if not runner.dry_run and fts_state == GITNEXUS_FTS_INDEXES_MISSING:
         recovery["attempted"] = True
+        recovery["reason"] = "fts_indexes_missing"
         repair = runner.run(
             [*gitnexus_command(snapshot, alias), "--force"],
             cwd=snapshot,
@@ -902,11 +936,16 @@ def _run_isolated_index(
                 cwd=snapshot,
                 env=environment,
             )
-            recovery["succeeded"] = nexus_search.ok and not gitnexus_fts_missing(nexus_search)
+            fts_state = gitnexus_fts_state(nexus_search)
+            recovery["succeeded"] = gitnexus_keyword_search_ok(nexus_search, fts_state)
+    elif not runner.dry_run and fts_state == GITNEXUS_FTS_RUNTIME_UNAVAILABLE:
+        recovery["reason"] = (
+            "windows_fts_runtime_unavailable" if sys.platform == "win32" else "fts_runtime_unavailable"
+        )
     source_unchanged = True if runner.dry_run else source_tree_identity(source) == identity
     nexus_index_exists = runner.dry_run or (snapshot / ".gitnexus").is_dir()
     graph_exists = runner.dry_run or graph_path.is_file()
-    search_warning = "warning" in f"{nexus_search.stdout}\n{nexus_search.stderr}".casefold()
+    nexus_search_ok = True if runner.dry_run else gitnexus_keyword_search_ok(nexus_search, fts_state)
     graph_issues = graphify_health_issues(graph)
     if preflight["observed_exceeds_budget"]:
         graph_issues["degraded"] = True
@@ -920,7 +959,7 @@ def _run_isolated_index(
         status = "DRY_RUN"
     elif not (graph.ok and nexus.ok and graph_exists and nexus_index_exists and source_unchanged):
         status = "PARTIAL"
-    elif graph_diagnostics_ok and status_ok and nexus_search.ok and not search_warning:
+    elif graph_diagnostics_ok and status_ok and nexus_search_ok:
         status = "HEALTHY"
     else:
         status = "DEGRADED"
@@ -944,7 +983,8 @@ def _run_isolated_index(
             "gitnexus_index_exists": nexus_index_exists,
             "gitnexus_status_ok": status_ok,
             "gitnexus_status_state": status_state,
-            "gitnexus_search_ok": nexus_search.ok and not search_warning,
+            "gitnexus_search_ok": nexus_search_ok,
+            "gitnexus_search_state": fts_state,
             "source_unchanged": source_unchanged,
         },
     }
@@ -1271,6 +1311,52 @@ def _parse_graph_query_nodes(result: CommandResult | None) -> tuple[list[dict[st
     return nodes, None
 
 
+def manifest_gitnexus_fts_state(manifest: Mapping[str, Any], role: str) -> str:
+    """Read current manifests and conservatively upgrade the old Windows recovery shape."""
+
+    indexes = manifest.get("indexes", {})
+    index = indexes.get(role, {}) if isinstance(indexes, Mapping) else {}
+    health = index.get("health", {}) if isinstance(index, Mapping) else {}
+    if not health:
+        manifest_health = manifest.get("health", {})
+        if isinstance(manifest_health, Mapping):
+            candidate = manifest_health.get(role, manifest_health if role == "dependency" else {})
+            health = candidate if isinstance(candidate, Mapping) else {}
+    state = health.get("gitnexus_search_state") if isinstance(health, Mapping) else None
+    if state:
+        return str(state)
+    recovery = index.get("gitnexus_recovery", {}) if isinstance(index, Mapping) else {}
+    if (
+        sys.platform == "win32"
+        and isinstance(recovery, Mapping)
+        and recovery.get("attempted")
+        and not recovery.get("succeeded")
+        and health.get("gitnexus_search_ok") is False
+    ):
+        return GITNEXUS_FTS_RUNTIME_UNAVAILABLE
+    if health.get("gitnexus_search_ok") is True:
+        return GITNEXUS_FTS_AVAILABLE
+    return GITNEXUS_FTS_UNKNOWN
+
+
+def gitnexus_keyword_query_available(state: str) -> bool:
+    return state not in {GITNEXUS_FTS_RUNTIME_UNAVAILABLE, GITNEXUS_FTS_INDEXES_MISSING}
+
+
+def gitnexus_keyword_limitation(role: str, state: str) -> str | None:
+    if state == GITNEXUS_FTS_RUNTIME_UNAVAILABLE:
+        return (
+            f"{role} GitNexus FTS runtime path is unavailable; keyword query skipped "
+            "while Graphify and symbolic GitNexus context/impact remain available."
+        )
+    if state == GITNEXUS_FTS_INDEXES_MISSING:
+        return (
+            f"{role} GitNexus FTS indexes remain unavailable after recovery; keyword query skipped "
+            "while Graphify and symbolic GitNexus context/impact remain available."
+        )
+    return None
+
+
 def research_indexes(
     indexing: dict[str, Any],
     question: str,
@@ -1287,6 +1373,8 @@ def research_indexes(
     consumer_alias = manifest.get("consumer_gitnexus_alias")
     consumer_snapshot = Path(manifest.get("consumer_gitnexus_source", ""))
     consumer_shared = bool(manifest.get("consumer_index_shared"))
+    dependency_fts_state = manifest_gitnexus_fts_state(manifest, "dependency")
+    consumer_fts_state = dependency_fts_state if consumer_shared else manifest_gitnexus_fts_state(manifest, "consumer")
     hints = [row.get("public_api") for row in evidence]
     terms = graph_query_terms(graph_path, question, hints)
     consumer_terms = terms if consumer_shared else graph_query_terms(consumer_graph_path, question, hints)
@@ -1318,21 +1406,26 @@ def research_indexes(
     consumer_nexus_payload: dict[str, Any] = {}
     group_payload: dict[str, Any] = {}
     contexts: list[dict[str, Any]] = []
+    capability_limitations: list[str] = []
     change_risk: dict[str, Any] = {"status": "NOT_REQUESTED", "risk": "UNKNOWN", "direct_callers": [], "processes": []}
     if alias and snapshot.is_dir() and home:
         environment = gitnexus_env(home.parent, snapshot, create=False)
-        nexus_result = runner.run(
-            [
-                "npx", "--no-install", "gitnexus", "query", question,
-                "--repo", str(alias), "--context", "Trace the consumer API into exact dependency implementation",
-                "--goal", "Return evidence-bearing definitions and execution flows", "--limit", "10",
-            ],
-            cwd=snapshot,
-            env=environment,
-        )
-        nexus_payload, nexus_error = _json_output_with_error(nexus_result)
-        if nexus_error:
-            parse_errors.append(f"GitNexus query: {nexus_error}.")
+        dependency_limitation = gitnexus_keyword_limitation("Dependency", dependency_fts_state)
+        if dependency_limitation:
+            capability_limitations.append(dependency_limitation)
+        if gitnexus_keyword_query_available(dependency_fts_state):
+            nexus_result = runner.run(
+                [
+                    "npx", "--no-install", "gitnexus", "query", question,
+                    "--repo", str(alias), "--context", "Trace the consumer API into exact dependency implementation",
+                    "--goal", "Return evidence-bearing definitions and execution flows", "--limit", "10",
+                ],
+                cwd=snapshot,
+                env=environment,
+            )
+            nexus_payload, nexus_error = _json_output_with_error(nexus_result)
+            if nexus_error:
+                parse_errors.append(f"GitNexus query: {nexus_error}.")
         context_hints = list(dict.fromkeys(str(item) for item in hints if item))
         if not context_hints:
             for node in graph_nodes:
@@ -1377,28 +1470,40 @@ def research_indexes(
                 parse_errors.append(f"GitNexus impact {target}: {impact_error}.")
         if not consumer_shared and consumer_alias and consumer_snapshot.is_dir():
             consumer_environment = gitnexus_env(home.parent, consumer_snapshot, create=False)
-            consumer_nexus_result = runner.run(
-                [
-                    "npx", "--no-install", "gitnexus", "query", question,
-                    "--repo", str(consumer_alias), "--context", "Find consumer imports, wrappers, calls, and tests",
-                    "--goal", "Return evidence-bearing consumer definitions and execution flows", "--limit", "10",
-                ],
-                cwd=consumer_snapshot,
-                env=consumer_environment,
-            )
-            consumer_nexus_payload, consumer_error = _json_output_with_error(consumer_nexus_result)
-            if consumer_error:
-                parse_errors.append(f"Consumer GitNexus query: {consumer_error}.")
+            consumer_limitation = gitnexus_keyword_limitation("Consumer", consumer_fts_state)
+            if consumer_limitation:
+                capability_limitations.append(consumer_limitation)
+            if gitnexus_keyword_query_available(consumer_fts_state):
+                consumer_nexus_result = runner.run(
+                    [
+                        "npx", "--no-install", "gitnexus", "query", question,
+                        "--repo", str(consumer_alias), "--context", "Find consumer imports, wrappers, calls, and tests",
+                        "--goal", "Return evidence-bearing consumer definitions and execution flows", "--limit", "10",
+                    ],
+                    cwd=consumer_snapshot,
+                    env=consumer_environment,
+                )
+                consumer_nexus_payload, consumer_error = _json_output_with_error(consumer_nexus_result)
+                if consumer_error:
+                    parse_errors.append(f"Consumer GitNexus query: {consumer_error}.")
         group_alias = manifest.get("gitnexus_group_alias")
         if manifest.get("gitnexus_group_opt_in") and group_alias:
-            group_result = runner.run(
-                ["npx", "--no-install", "gitnexus", "group", "query", str(group_alias), question, "--limit", "10", "--json"],
-                cwd=snapshot,
-                env=environment,
+            group_keyword_available = gitnexus_keyword_query_available(dependency_fts_state) and (
+                consumer_shared or gitnexus_keyword_query_available(consumer_fts_state)
             )
-            group_payload, group_error = _json_output_with_error(group_result)
-            if group_error:
-                parse_errors.append(f"GitNexus group query: {group_error}.")
+            if group_keyword_available:
+                group_result = runner.run(
+                    ["npx", "--no-install", "gitnexus", "group", "query", str(group_alias), question, "--limit", "10", "--json"],
+                    cwd=snapshot,
+                    env=environment,
+                )
+                group_payload, group_error = _json_output_with_error(group_result)
+                if group_error:
+                    parse_errors.append(f"GitNexus group query: {group_error}.")
+            else:
+                capability_limitations.append(
+                    "GitNexus group keyword query skipped because at least one role has no usable FTS keyword-search path."
+                )
     return {
         "query_terms": terms,
         "consumer_query_terms": consumer_terms,
@@ -1416,6 +1521,11 @@ def research_indexes(
         "contexts": contexts,
         "change_risk": change_risk,
         "parse_errors": parse_errors,
+        "capability_limitations": capability_limitations,
+        "gitnexus_search_states": {
+            "dependency": dependency_fts_state,
+            "consumer": consumer_fts_state,
+        },
     }
 
 
@@ -1825,13 +1935,14 @@ def _run_research_index(
     source_unchanged = source_tree_identity(source) == identity
     graph_exists = graph_path.is_file()
     nexus_index_exists = snapshot.joinpath(".gitnexus").is_dir()
-    search_warning = "warning" in f"{nexus_search.stdout}\n{nexus_search.stderr}".casefold()
+    fts_state = gitnexus_fts_state(nexus_search)
+    nexus_search_ok = gitnexus_keyword_search_ok(nexus_search, fts_state)
     status_state = gitnexus_status_state(nexus_status)
     status_ok = gitnexus_status_ok(nexus_status)
     attempted_ok = (graph_result is None or graph_result.ok) and (nexus_result is None or nexus_result.ok)
     if not (attempted_ok and graph_exists and nexus_index_exists and source_unchanged):
         status = "PARTIAL"
-    elif graph_health.ok and status_ok and nexus_search.ok and not search_warning:
+    elif graph_health.ok and status_ok and nexus_search_ok:
         status = "HEALTHY"
     else:
         status = "DEGRADED"
@@ -1851,7 +1962,8 @@ def _run_research_index(
             "gitnexus_index_exists": nexus_index_exists,
             "gitnexus_status_ok": status_ok,
             "gitnexus_status_state": status_state,
-            "gitnexus_search_ok": nexus_search.ok and not search_warning,
+            "gitnexus_search_ok": nexus_search_ok,
+            "gitnexus_search_state": fts_state,
             "source_unchanged": source_unchanged,
         },
     }
@@ -2051,6 +2163,8 @@ def _repository_research(
         "consumer_gitnexus_source": indexed["gitnexus_source"],
         "consumer_index_shared": True,
         "gitnexus_group_opt_in": False,
+        "health": {"dependency": indexed.get("health", {}), "consumer": indexed.get("health", {})},
+        "indexes": {"dependency": indexed, "consumer": indexed},
     }
     focus_evidence = [{"public_api": term} for term in repository.get("focus_terms", [])]
     research = research_indexes(
@@ -2061,6 +2175,7 @@ def _repository_research(
         args.mode,
     ) if indexed["status"] in {"HEALTHY", "DEGRADED"} else {}
     limitations = list(research.get("parse_errors", []))
+    limitations.extend(research.get("capability_limitations", []))
     limitations.extend(profile_limitations)
     if planned_source:
         limitations.append("Dry-run planned repository resolution and isolated indexes with placeholder paths; no source was fetched.")
@@ -2299,6 +2414,7 @@ def analyze(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
     if not research.get("query_terms"):
         limitations.append("The question and constrained intent expansion had no overlap with Graphify vocabulary; no graph traversal was fabricated.")
     limitations.extend(research.get("parse_errors", []))
+    limitations.extend(research.get("capability_limitations", []))
     nexus_payload = research.get("gitnexus_payload", {})
     if nexus_payload.get("warning"):
         limitations.append(f"GitNexus warning: {nexus_payload['warning']}")
@@ -2391,6 +2507,7 @@ def audit(args: argparse.Namespace, runner: CommandRunner) -> dict[str, Any]:
             limitations.append(f"Facet {name!r} lacks graph evidence on one side.")
         limitations.extend(f"Facet {name!r}: {error}" for error in facet.get("errors", []))
     limitations.extend(research.get("parse_errors", []))
+    limitations.extend(research.get("capability_limitations", []))
     nexus_payload = research.get("gitnexus_payload", {})
     if nexus_payload.get("warning"):
         limitations.append(f"GitNexus warning: {nexus_payload['warning']}")
