@@ -12,7 +12,7 @@ SGRX ist ein portabler Agent Skill und ein CLI-Workflow, der nicht an eine besti
 
 Stelle eine normale Frage. SGRX findet relevante KI-Paper und konkrete GitHub-Implementierungen, untersucht deren Quellcode und liefert einen praxisnahen Plan mit Belegen.
 
-Aktuelle Version: **0.5.0**
+Aktuelle Version: **0.5.1**
 
 ## Was kann ich fragen?
 

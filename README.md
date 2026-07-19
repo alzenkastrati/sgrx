@@ -12,7 +12,7 @@ SGRX ships as a portable Agent Skill and a harness-neutral CLI workflow. It rese
 
 Ask a normal question. SGRX finds relevant AI papers and exact GitHub implementations, studies their source code, and returns a practical plan with evidence.
 
-Current version: **0.5.0**
+Current version: **0.5.1**
 
 ## What can I ask?
 

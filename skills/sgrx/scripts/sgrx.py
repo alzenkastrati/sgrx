@@ -46,7 +46,7 @@ from sgrx_audit import (  # noqa: E402
 
 
 BRAND = "SGRX — Source Graph Research eXplorer"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 EVIDENCE_STATUSES = ("EXTRACTED", "INFERRED", "AMBIGUOUS")
 MODES = ("quick", "standard", "deep")
 REGISTRIES = ("npm", "pypi", "crates", "github")

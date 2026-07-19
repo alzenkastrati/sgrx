@@ -6,6 +6,8 @@ All notable changes to SGRX are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-20
+
 ### Fixed
 
 - Classify GitNexus 1.6.5's Windows FTS runtime limitation without forcing an ineffective index rebuild, and route degraded keyword searches to Graphify plus symbolic GitNexus queries.
@@ -65,7 +67,8 @@ All notable changes to SGRX are documented in this file. The format follows
 
 - Initial public repository structure, orchestration CLI, deterministic tests, and Codex skill metadata.
 
-[Unreleased]: https://github.com/alzenkastrati/sgrx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/alzenkastrati/sgrx/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/alzenkastrati/sgrx/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alzenkastrati/sgrx/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/alzenkastrati/sgrx/compare/v0.2.1...v0.4.1
 [0.2.1]: https://github.com/alzenkastrati/sgrx/compare/v0.2.0...v0.2.1
