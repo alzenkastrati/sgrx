@@ -39,7 +39,7 @@ Use a safe argument vector and prevent implicit npx downloads when orchestrating
 
 Before changing a symbol, query upstream impact. Report direct callers, affected processes, and the GitNexus risk level. Pause for confirmation at HIGH or CRITICAL. Before committing an authorized change, run `gitnexus detect-changes` and include its result in the handoff.
 
-When keyword queries report missing FTS indexes, run one forced rebuild against the same isolated snapshot and alias, then repeat the health query. Never retry indefinitely and never rebuild an index in fetched source or global state. Keep the run degraded if search remains unavailable; direct symbol context may still be reported separately.
+On Windows, treat GitNexus's generic missing-FTS warning as `FTS_RUNTIME_UNAVAILABLE`: do not rebuild, keep keyword search degraded, and fall back to Graphify plus symbolic GitNexus `context` and `impact`. On other platforms, when keyword queries report genuinely missing FTS indexes, run one forced rebuild against the same isolated snapshot and alias, then repeat the health query. Never retry indefinitely and never rebuild an index in fetched source or global state. Keep the run degraded if search remains unavailable; direct symbol context may still be reported separately.
 
 ## Select depth
 

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +93,23 @@ class FacetRunner(sgrx.CommandRunner):
         return result
 
 
+class SymbolicFallbackRunner(sgrx.CommandRunner):
+    def __init__(self):
+        super().__init__(timeout=1)
+
+    def run(self, args, *, cwd=None, env=None):
+        vector = list(args)
+        if vector[:2] == ["graphify", "query"]:
+            stdout = "NODE Validation [src=workflow.md loc=L12 community=1]\n"
+        elif vector[:4] == ["npx", "--no-install", "gitnexus", "context"]:
+            stdout = '{"symbol": {"name": "Validation"}, "processes": []}'
+        else:
+            stdout = "{}"
+        result = sgrx.CommandResult(vector, 0, stdout=stdout)
+        self.history.append(result)
+        return result
+
+
 class CorpusPlanningTests(unittest.TestCase):
     def test_code_docs_profile_excludes_images_and_honors_budget(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -165,6 +183,24 @@ class CorpusPlanningTests(unittest.TestCase):
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_fts_warning_is_platform_sensitive_and_raw_runtime_error_is_preserved(self):
+        warning = sgrx.CommandResult(
+            ["gitnexus", "query"],
+            0,
+            stdout='{"warning": "FTS indexes missing"}',
+        )
+        raw_error = sgrx.CommandResult(
+            ["gitnexus", "query"],
+            1,
+            stderr="QUERY_FTS_INDEX is not defined",
+        )
+
+        self.assertEqual(sgrx.gitnexus_fts_state(warning, "win32"), "FTS_RUNTIME_UNAVAILABLE")
+        self.assertEqual(sgrx.gitnexus_fts_state(warning, "linux"), "FTS_INDEXES_MISSING")
+        self.assertEqual(sgrx.gitnexus_fts_state(raw_error, "win32"), "FTS_RUNTIME_UNAVAILABLE")
+        self.assertFalse(sgrx.gitnexus_fts_missing(warning, "win32"))
+        self.assertTrue(sgrx.gitnexus_fts_missing(warning, "linux"))
+
     def test_exact_github_sha_is_preserved_without_git_metadata(self):
         sha = "b" * 40
         payload = sgrx.resolve_dependency(namespace(ref=sha), sgrx.CommandRunner(dry_run=True))
@@ -187,7 +223,7 @@ class ReliabilityTests(unittest.TestCase):
         self.assertTrue(issues["data_loss_risk"])
         self.assertTrue(issues["degraded"])
 
-    def test_missing_fts_is_rebuilt_once_inside_each_isolated_snapshot(self):
+    def test_missing_fts_is_rebuilt_once_inside_each_isolated_snapshot_off_windows(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "consumer"
             source = Path(directory) / "dependency"
@@ -195,7 +231,8 @@ class ReliabilityTests(unittest.TestCase):
             project.joinpath("app.py").write_text("value = 1\n", encoding="utf-8")
             source.joinpath("lib.py").write_text("value = 2\n", encoding="utf-8")
             runner = RecoveryRunner()
-            payload = sgrx.index_sources(namespace(project=str(project), dry_run=False), runner, source)
+            with mock.patch.object(sgrx.sys, "platform", "linux"):
+                payload = sgrx.index_sources(namespace(project=str(project), dry_run=False), runner, source)
 
             self.assertEqual(payload["status"], "HEALTHY")
             for role in ("dependency", "consumer"):
@@ -204,6 +241,26 @@ class ReliabilityTests(unittest.TestCase):
                 self.assertTrue(recovery["succeeded"])
             repair_commands = [item.args for item in runner.history if "--force" in item.args]
             self.assertEqual(len(repair_commands), 2)
+
+    def test_windows_fts_runtime_unavailable_does_not_rebuild(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "consumer"
+            source = Path(directory) / "dependency"
+            project.mkdir(); source.mkdir()
+            project.joinpath("app.py").write_text("value = 1\n", encoding="utf-8")
+            source.joinpath("lib.py").write_text("value = 2\n", encoding="utf-8")
+            runner = RecoveryRunner()
+            with mock.patch.object(sgrx.sys, "platform", "win32"):
+                payload = sgrx.index_sources(namespace(project=str(project), dry_run=False), runner, source)
+
+            self.assertEqual(payload["status"], "DEGRADED")
+            for role in ("dependency", "consumer"):
+                index = payload["manifest"]["indexes"][role]
+                self.assertEqual(index["health"]["gitnexus_search_state"], "FTS_RUNTIME_UNAVAILABLE")
+                self.assertFalse(index["health"]["gitnexus_search_ok"])
+                self.assertFalse(index["gitnexus_recovery"]["attempted"])
+                self.assertEqual(index["gitnexus_recovery"]["reason"], "windows_fts_runtime_unavailable")
+            self.assertFalse(any("--force" in item.args for item in runner.history))
 
     def test_report_gate_rejects_unredacted_commands_and_observed_budget_overrun(self):
         payload = {
@@ -243,6 +300,57 @@ class ReliabilityTests(unittest.TestCase):
 
 
 class AuditWorkflowTests(unittest.TestCase):
+    def test_windows_runtime_unavailable_uses_graphify_and_symbolic_gitnexus_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = root / "graphify-out" / "graph.json"
+            graph.parent.mkdir(parents=True)
+            graph.write_text(json.dumps({"nodes": [{"label": "Validation Workflow"}]}), encoding="utf-8")
+            snapshot = root / "gitnexus-source"
+            snapshot.mkdir()
+            home = root / "gitnexus-home"
+            home.mkdir()
+            indexed = {
+                "health": {
+                    "gitnexus_search_ok": False,
+                    "gitnexus_search_state": "FTS_RUNTIME_UNAVAILABLE",
+                },
+                "gitnexus_recovery": {
+                    "attempted": False,
+                    "succeeded": False,
+                    "reason": "windows_fts_runtime_unavailable",
+                },
+            }
+            indexing = {
+                "manifest": {
+                    "graph_path": str(graph),
+                    "consumer_graph_path": str(graph),
+                    "gitnexus_alias": "dependency",
+                    "consumer_gitnexus_alias": "dependency",
+                    "gitnexus_source": str(snapshot),
+                    "consumer_gitnexus_source": str(snapshot),
+                    "gitnexus_home": str(home),
+                    "consumer_index_shared": True,
+                    "indexes": {"dependency": indexed, "consumer": indexed},
+                },
+            }
+            runner = SymbolicFallbackRunner()
+
+            research = sgrx.research_indexes(
+                indexing,
+                "Improve validation",
+                [{"public_api": "Validation"}],
+                runner,
+                mode="standard",
+            )
+
+            nexus_commands = [item.args for item in runner.history if item.args[:3] == ["npx", "--no-install", "gitnexus"]]
+            self.assertFalse(any(command[3] == "query" for command in nexus_commands))
+            self.assertTrue(any(command[3] == "context" for command in nexus_commands))
+            self.assertTrue(research["contexts"])
+            self.assertEqual(research["gitnexus_search_states"]["dependency"], "FTS_RUNTIME_UNAVAILABLE")
+            self.assertTrue(any("keyword query skipped" in item for item in research["capability_limitations"]))
+
     def test_analyze_queries_are_checkpointed_and_reused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

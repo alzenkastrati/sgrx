@@ -6,6 +6,10 @@ All notable changes to SGRX are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Classify GitNexus 1.6.5's Windows FTS runtime limitation without forcing an ineffective index rebuild, and route degraded keyword searches to Graphify plus symbolic GitNexus queries.
+
 ## [0.5.0] - 2026-07-17
 
 ### Added

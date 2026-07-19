@@ -222,7 +222,7 @@ SGRX analyzes by default. It changes your application only when you explicitly a
 - Audit and analyze runs write durable resolution, corpus, index, query, evidence, verification, report, and handoff artifacts below their isolated `.sgrx` scope.
 - On Windows, incomplete long-path checkouts are retried in an isolated short cache with `core.longpaths`. Global Git settings are not changed.
 - Pure paper or document graphs need a supported Graphify semantic backend. Without one, SGRX reports the paper graph as `PARTIAL` instead of inventing relationships.
-- If GitNexus reports missing FTS indexes, SGRX performs one forced rebuild inside the isolated snapshot. The run remains visibly degraded when search is still unavailable.
+- On Windows, SGRX classifies GitNexus's generic missing-FTS warning as an unavailable FTS runtime path and does not rebuild an intact index. Keyword search remains visibly degraded while Graphify and symbolic GitNexus context/impact queries remain available. On other platforms, genuinely missing FTS indexes are rebuilt exactly once inside the isolated snapshot.
 - Graphify zero-node files, extraction issues, and cross-chunk ID collisions are structured health failures and can no longer pass the verification gate as healthy.
 - The CLI does not silently browse the web itself. Codex discovers current papers and repositories; the local CLI ranks and analyzes the recorded candidates.
 
